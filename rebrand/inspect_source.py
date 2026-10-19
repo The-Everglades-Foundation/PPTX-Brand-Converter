@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-import re
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +27,7 @@ from helpers import (  # noqa: E402
     is_edge_logo,
     is_footer_shape,
     is_line_or_arrow,
+    is_org_chrome,
     iter_shapes_abs,
     paragraphs_from_shape,
     picture_crop,
@@ -39,7 +39,6 @@ from helpers import (  # noqa: E402
 
 TITLE_TYPE_NAMES = {"TITLE", "CENTER_TITLE", "VERTICAL_TITLE"}
 SUBTITLE_TYPE_NAMES = {"SUBTITLE"}
-ORG_CHROME_RE = re.compile(r"^(the\s+)?everglades\s+foundation$", re.I)
 
 
 def _bounds(shape, left: int, top: int) -> dict[str, int]:
@@ -190,7 +189,7 @@ def classify_source_slide(index: int, total: int, title: str, subtitle: str, sha
         if dominating and len(text_blocks) <= 2:
             return "PICTURE"
         caption_only = len(body_text.split()) <= 16
-        large = [p for p in photos if p.get("area_ratio", 0) > 0.28]
+        large = [p for p in photos if p.get("area_ratio", 0) > 0.22]
         if large and caption_only and not tables and not charts:
             return "PICTURE"
 
@@ -201,6 +200,7 @@ def classify_source_slide(index: int, total: int, title: str, subtitle: str, sha
         and (s.get("placeholder_type") or "") not in TITLE_TYPE_NAMES | SUBTITLE_TYPE_NAMES
         and not s.get("drop_footer")
         and not (s.get("kind") == "picture" and is_decorative_icon(s))
+        and not (s.get("kind") == "text" and not (s.get("text") or "").strip())
     ]
     if _two_side_by_side(spatial_blocks, slide_w):
         return "TWO_CONTENT"
@@ -210,9 +210,9 @@ def classify_source_slide(index: int, total: int, title: str, subtitle: str, sha
             return "TITLE_BODY"
         return "TITLE_ONLY"
 
-    if title and len(text_blocks) == 1 and not tables and not charts and not pictures:
+    if title and len(text_blocks) == 1 and not tables and not charts and not photos:
         return "TITLE_BODY"
-    if len(text_blocks) >= 1 and not tables and not charts and not pictures:
+    if len(text_blocks) >= 1 and not tables and not charts and not photos:
         return "TITLE_BODY"
     return "TITLE_ONLY"
 
@@ -233,8 +233,7 @@ def _two_side_by_side(blocks: list[dict[str, Any]], slide_w: int) -> bool:
 
 
 def _is_org_chrome(text: str) -> bool:
-    t = " ".join((text or "").split())
-    return bool(ORG_CHROME_RE.match(t))
+    return is_org_chrome(text)
 
 
 def _title_ready(shape: dict[str, Any]) -> str:
@@ -287,6 +286,21 @@ def pick_title(shapes: list[dict[str, Any]]) -> tuple[str, str]:
                 title = candidate
     if subtitle and _is_org_chrome(subtitle):
         subtitle = ""
+    if title and _is_org_chrome(title):
+        title = ""
+    if not title:
+        for shape in shapes:
+            if shape.get("drop_footer"):
+                continue
+            for para in ((shape.get("text_frame") or {}).get("paragraphs") or []):
+                line = (para.get("text") or "").strip()
+                if not line or _is_org_chrome(line):
+                    continue
+                if 1 <= len(line.split()) <= 8:
+                    title = line
+                    break
+            if title:
+                break
     return title, subtitle
 
 

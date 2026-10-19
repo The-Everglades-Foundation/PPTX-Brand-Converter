@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from helpers import (  # noqa: E402
     dump_json,
     fits,
     is_decorative_icon,
+    is_org_chrome,
     layout_index_for_role,
     load_json,
     reduce_body_size,
@@ -539,6 +541,78 @@ def _is_full_width_block(shape: dict[str, Any], blocks: list[dict[str, Any]]) ->
     return width >= int(span * 0.72) if span else False
 
 
+_HEADING_LINE_RE = re.compile(
+    r"^(?:(?:step|phase)\s+\d+\b|\d+\s*[·.)-])",
+    re.I,
+)
+
+
+def _is_point_heading(text: str) -> bool:
+    t = " ".join((text or "").split())
+    if not t or is_org_chrome(t):
+        return False
+    if " — " in t or " – " in t:
+        label = t.split(" — ")[0].split(" – ")[0]
+        return 1 <= len(label.split()) <= 8
+    words = t.split()
+    if _HEADING_LINE_RE.match(t):
+        return True
+    if 1 <= len(words) <= 8 and not t.endswith((".", "!", "?")):
+        return True
+    return False
+
+
+def _body_point_count(slide: dict[str, Any] | None) -> int:
+    """Heading-like lines inside one body well (Today / Step 1 / Label —)."""
+    if not slide:
+        return 0
+    title = (slide.get("title_text") or "").strip()
+    numbered = 0
+    emdash = 0
+    shorts = 0
+    for shape in content_shapes(slide):
+        if shape.get("kind") != "text":
+            continue
+        ph = (shape.get("placeholder_type") or "").upper()
+        if ph in {"TITLE", "CENTER_TITLE", "VERTICAL_TITLE", "SUBTITLE"}:
+            continue
+        paras = ((shape.get("text_frame") or {}).get("paragraphs") or [])
+        lines = [((p.get("text") or "").strip()) for p in paras] if paras else [(shape.get("text") or "").strip()]
+        for line in lines:
+            if not line or line == title or is_org_chrome(line):
+                continue
+            compact = " ".join(line.split())
+            if _HEADING_LINE_RE.match(compact):
+                numbered += 1
+            elif " — " in compact or " – " in compact:
+                label = compact.split(" — ")[0].split(" – ")[0]
+                if 1 <= len(label.split()) <= 8:
+                    emdash += 1
+            elif _is_point_heading(compact):
+                shorts += 1
+    if numbered == 4 and shorts >= 3:
+        return 4
+    if numbered >= 2 and shorts >= 2:
+        return numbered + shorts
+    if numbered >= 2:
+        return numbered
+    if emdash >= 2:
+        return emdash + shorts
+    return numbered + emdash + shorts
+
+
+def _entry_has_competing_body(entry: dict[str, Any]) -> bool:
+    """True when body copy would fight a table/chart for the same well."""
+    for placement in entry.get("placements") or []:
+        if placement.get("kind") not in {"body", "textbox", "caption", "subtitle"}:
+            continue
+        paras = placement.get("paragraphs") or []
+        text = " ".join((p.get("text") or "") for p in paras) or str(placement.get("text") or "")
+        if len(text.split()) >= 8:
+            return True
+    return False
+
+
 def _content_slot_count(slide: dict[str, Any] | None) -> int:
     """Cards the copy wants: KPI tiles, ALL-CAPS labels, or long statements.
 
@@ -589,7 +663,8 @@ def _content_slot_count(slide: dict[str, Any] | None) -> int:
         return 3
     if n_stmt >= 4:
         return max(3, cols)
-    return cols
+    points = _body_point_count(slide)
+    return max(cols, points)
 
 
 def _dense_text_layout(tokens: dict[str, Any], layout_index: int) -> bool:
@@ -648,14 +723,14 @@ def pick_prototype_layout(
             return found
 
     if not n_pics:
-        if slots >= 5 and cols <= 2:
-            return prototype_index_matching(tokens, "contents or any numbered", "contents") or default
         if slots >= 4 or cols >= 4:
             return (
                 prototype_index_matching(tokens, "timeline or process", "sequence")
                 or prototype_index_matching(tokens, "contents or any numbered", "contents")
                 or default
             )
+        if slots >= 5 and cols <= 2:
+            return prototype_index_matching(tokens, "contents or any numbered", "contents") or default
         if role == "TWO_CONTENT" or slots >= 2 or cols >= 2:
             if slots >= 3 or cols >= 3:
                 return prototype_index_matching(tokens, "three parts", "three parallel") or default
@@ -798,7 +873,7 @@ def build_plan(
             "flags": sorted(set(flags)),
         }
         data_pls = [p for p in entry["placements"] if p.get("kind") in {"table", "chart"}]
-        if data_pls and _dense_text_layout(tokens, layout_index):
+        if data_pls and _dense_text_layout(tokens, layout_index) and _entry_has_competing_body(entry):
             text_entry = json.loads(json.dumps(entry))
             text_entry["placements"] = [p for p in text_entry["placements"] if p.get("kind") not in {"table", "chart"}]
             data_entry = json.loads(json.dumps(entry))

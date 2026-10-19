@@ -28,6 +28,7 @@ from colorways import (  # noqa: E402
     promote_text_into_empty_cards,
     purge_empty_table_chrome,
     purge_rules_over_text,
+    shrink_short_copy_wells,
     _placement_is_icon,
     remap_srgb_in_slide,
     sanitize_new_picture,
@@ -276,8 +277,7 @@ def _data_box(slide, tokens: dict[str, Any], min_height: int, kind: str = "table
     texts = _occupied_text_boxes(slide)
     top = int(safe["top"])
     for box in texts:
-        if box["top"] < int(slide_h * 0.32):
-            top = max(top, box["top"] + box["height"] + int(0.18 * 914400))
+        top = max(top, box["top"] + box["height"] + int(0.18 * 914400))
     charts = []
     tables = []
     for shape in slide.shapes:
@@ -556,6 +556,7 @@ def fill_prototype_slide(slide, entry: dict[str, Any], tokens: dict[str, Any], b
     purge_rules_over_text(slide, tokens)
     collapse_overlapping_text(slide)
     if any(p.get("kind") in {"table", "chart"} for p in rest_deferred):
+        shrink_short_copy_wells(slide)
         purge_empty_table_chrome(slide, tokens)
     rest_deferred.sort(
         key=lambda p: 0 if p.get("kind") == "chart" else 1 if p.get("kind") == "table" else 2

@@ -862,6 +862,18 @@ def crop_cut_fraction(crop: dict[str, int]) -> float:
     return max(0.0, 1 - remain)
 
 
+ORG_CHROME_RE = re.compile(
+    r"^(the\s+)?everglades\s+foundation(\s*[·•|\-—:]\s+\S+(?:\s+\S+){0,6})?$",
+    re.I,
+)
+
+
+def is_org_chrome(text: str) -> bool:
+    """True for org lockup lines, including 'ORG · PROGRAM' kickers."""
+    t = " ".join((text or "").split())
+    return bool(ORG_CHROME_RE.match(t))
+
+
 def is_decorative_icon(shape_or_image: dict[str, Any] | None) -> bool:
     """True for tiny PptxGenJS / UI glyphs — not photographs for photo wells.
 
@@ -869,7 +881,7 @@ def is_decorative_icon(shape_or_image: dict[str, Any] | None) -> bool:
     portraits, Sequence card frames, or a full-bleed Kicker well — even when
     the source scaled the glyph onto a KPI tile. A *low-res* blob that already
     occupies a real photo area (sample marsh ~120px filling the slide) is still
-    a photograph.
+    a photograph. Extreme-aspect grass/rule strips are dividers, not heroes.
     """
     if not shape_or_image:
         return False
@@ -891,6 +903,10 @@ def is_decorative_icon(shape_or_image: dict[str, Any] | None) -> bool:
     except (TypeError, ValueError):
         nbytes = 0
     ext = str(image.get("ext") or image.get("content_type") or "").lower()
+    if width and height:
+        aspect = width / max(1, height)
+        if (aspect >= 8.0 or aspect <= 0.125) and 0 < nbytes < 40000 and "png" in ext:
+            return True
     # Stretched thumbnail filling a hero well (120px marsh @ 46% area) is a photo.
     if px_max and px_max <= 160 and area >= 0.15:
         return False
