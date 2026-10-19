@@ -16,6 +16,7 @@ from helpers import (  # noqa: E402
     content_safe_box,
     dump_json,
     fits,
+    is_decorative_icon,
     layout_index_for_role,
     load_json,
     reduce_body_size,
@@ -253,6 +254,7 @@ def placements_for_slide(
                     "shape_id": shape.get("id"),
                     "bounds": shape.get("bounds"),
                     "image": shape.get("image"),
+                    "area_ratio": shape.get("area_ratio"),
                 }
             )
         elif kind == "table":
@@ -298,15 +300,16 @@ def placements_for_slide(
                 }
             )
         elif kind == "text":
-            placements.append(
-                {
-                    "kind": "callout",
-                    "target": "autoshape",
-                    "shape_id": shape.get("id"),
-                    "bounds": shape.get("bounds"),
-                    "paragraphs": (shape.get("text_frame") or {}).get("paragraphs") or [],
-                }
-            )
+            if _callout_worth_keeping(shape):
+                placements.append(
+                    {
+                        "kind": "callout",
+                        "target": "autoshape",
+                        "shape_id": shape.get("id"),
+                        "bounds": shape.get("bounds"),
+                        "paragraphs": (shape.get("text_frame") or {}).get("paragraphs") or [],
+                    }
+                )
         elif shape.get("is_line"):
             placements.append(
                 {
@@ -317,16 +320,33 @@ def placements_for_slide(
                 }
             )
         elif kind == "text" or (kind == "other" and (shape.get("text") or "").strip()):
-            placements.append(
-                {
-                    "kind": "callout",
-                    "target": "autoshape",
-                    "shape_id": shape.get("id"),
-                    "bounds": shape.get("bounds"),
-                    "paragraphs": (shape.get("text_frame") or {}).get("paragraphs") or [],
-                }
-            )
+            if _callout_worth_keeping(shape):
+                placements.append(
+                    {
+                        "kind": "callout",
+                        "target": "autoshape",
+                        "shape_id": shape.get("id"),
+                        "bounds": shape.get("bounds"),
+                        "paragraphs": (shape.get("text_frame") or {}).get("paragraphs") or [],
+                    }
+                )
     return placements
+
+
+MIN_CALLOUT_EMU = int(0.08 * 914400)
+
+
+def _callout_worth_keeping(shape: dict[str, Any]) -> bool:
+    """Skip empty PptxGenJS cards / hairlines that become lime overlay rectangles."""
+    text = (shape.get("text") or "").strip()
+    if not text:
+        return False
+    bounds = shape.get("bounds") or {}
+    if int(bounds.get("width") or 0) < MIN_CALLOUT_EMU:
+        return False
+    if int(bounds.get("height") or 0) < MIN_CALLOUT_EMU:
+        return False
+    return True
 
 
 def split_entries_for(entry: dict[str, Any], tokens: dict[str, Any]) -> list[dict[str, Any]]:
@@ -429,19 +449,155 @@ def _source_pictures(slide: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         shape
         for shape in slide.get("shapes") or []
-        if shape.get("kind") == "picture" and not shape.get("drop_logo") and not shape.get("drop_footer")
+        if shape.get("kind") == "picture"
+        and not shape.get("drop_logo")
+        and not shape.get("drop_footer")
+        and not is_decorative_icon(shape)
     ]
 
 
-def pick_prototype_layout(tokens: dict[str, Any], role: str, pictures: list[dict[str, Any]]) -> int:
-    """Prefer a sample slide whose photo wells match the source pictures."""
+def _proto_blob(proto: dict[str, Any]) -> str:
+    return f"{proto.get('name') or ''} {proto.get('notes') or ''}".lower()
+
+
+def prototype_index_matching(tokens: dict[str, Any], *needles: str) -> int | None:
+    lowered = [n.lower() for n in needles]
+    for proto in tokens.get("prototypes") or []:
+        blob = _proto_blob(proto)
+        if any(needle in blob for needle in lowered):
+            return int(proto["index"])
+    return None
+
+
+def _text_column_count(slide: dict[str, Any] | None) -> int:
+    if not slide:
+        return 0
+    title = title_shape(slide)
+    title_id = title.get("id") if title else None
+    blocks = []
+    for shape in content_shapes(slide):
+        if shape.get("id") == title_id:
+            continue
+        if shape.get("kind") != "text":
+            continue
+        text = (shape.get("text") or "").strip()
+        if not text:
+            continue
+        ph = (shape.get("placeholder_type") or "").upper()
+        if ph in {"TITLE", "CENTER_TITLE", "VERTICAL_TITLE", "SUBTITLE"}:
+            continue
+        blocks.append(shape)
+    if len(blocks) < 2:
+        return len(blocks)
+    widths = [int((s.get("bounds") or {}).get("width") or 0) for s in blocks]
+    median = sorted(widths)[len(widths) // 2] if widths else 0
+    narrow = [
+        s
+        for s in blocks
+        if int((s.get("bounds") or {}).get("width") or 0) <= max(int(median * 1.6), int(4.2 * 914400))
+    ]
+    if len(narrow) >= 2:
+        blocks = narrow
+    ordered = sorted(blocks, key=lambda s: int((s.get("bounds") or {}).get("left") or 0))
+    groups = 1
+    prev_right = int((ordered[0].get("bounds") or {}).get("left") or 0) + int(
+        (ordered[0].get("bounds") or {}).get("width") or 0
+    )
+    prev_center = int((ordered[0].get("bounds") or {}).get("left") or 0) + int(
+        (ordered[0].get("bounds") or {}).get("width") or 0
+    ) / 2
+    for shape in ordered[1:]:
+        bounds = shape.get("bounds") or {}
+        left = int(bounds.get("left") or 0)
+        width = int(bounds.get("width") or 0)
+        center = left + width / 2
+        if left >= prev_right - int(0.2 * 914400) and center - prev_center >= 1.2 * 914400:
+            groups += 1
+            prev_right = left + width
+            prev_center = center
+        else:
+            prev_right = max(prev_right, left + width)
+    return groups
+
+
+def _dense_text_layout(tokens: dict[str, Any], layout_index: int) -> bool:
+    proto = next(
+        (p for p in tokens.get("prototypes") or [] if int(p.get("index") or -1) == int(layout_index)),
+        None,
+    )
+    if not proto:
+        return False
+    blob = _proto_blob(proto)
+    return any(
+        token in blob
+        for token in (
+            "three parts",
+            "two points",
+            "people",
+            "kicker",
+            "contents",
+            "by the numbers",
+            "cover layout",
+            "sequence",
+            "statement slide",
+            "the point",
+        )
+    )
+
+
+def pick_prototype_layout(
+    tokens: dict[str, Any],
+    role: str,
+    pictures: list[dict[str, Any]],
+    slide: dict[str, Any] | None = None,
+) -> int:
+    """Prefer a sample slide whose photo wells match real photographs."""
     default = layout_index_for_role(tokens, role)
     prototypes = tokens.get("prototypes") or []
     if not prototypes:
         return default
-    n_pics = len(pictures)
+    real = [p for p in pictures if not is_decorative_icon(p)]
+    n_pics = len(real)
+    cols = _text_column_count(slide)
+    n_tables = sum(1 for s in (slide or {}).get("shapes") or [] if s.get("kind") == "table")
+    n_charts = sum(1 for s in (slide or {}).get("shapes") or [] if s.get("kind") == "chart")
+
+    if role == "TITLE":
+        return prototype_index_matching(tokens, "cover layout") or default
+    if role == "CLOSING":
+        return prototype_index_matching(tokens, "closing slide") or default
+    if role == "SECTION":
+        return prototype_index_matching(tokens, "section divider") or default
+
+    if n_tables and cols <= 1 and n_pics == 0 and role == "TITLE_ONLY":
+        found = prototype_index_matching(tokens, "data table", "comparison")
+        if found is not None:
+            return found
+
     if not n_pics:
+        if cols >= 4:
+            return (
+                prototype_index_matching(tokens, "timeline or process", "sequence")
+                or prototype_index_matching(tokens, "contents or any numbered", "contents")
+                or default
+            )
+        if role == "TWO_CONTENT" or cols >= 2:
+            if cols >= 3:
+                return prototype_index_matching(tokens, "three parts", "three parallel") or default
+            return prototype_index_matching(tokens, "two-point", "two points") or default
+        if role == "TITLE_BODY":
+            if cols <= 1:
+                return prototype_index_matching(tokens, "statement slide") or default
+            return prototype_index_matching(tokens, "contents or any numbered", "contents") or default
+        if role == "TITLE_ONLY":
+            if n_tables:
+                return prototype_index_matching(tokens, "data table", "comparison") or default
+            if n_charts:
+                return prototype_index_matching(tokens, "statement slide") or default
+            return prototype_index_matching(tokens, "statement slide") or default
         return default
+
+    pictures = real
 
     src_w = max(1, int(tokens.get("_src_w") or tokens.get("slide_width") or 1))
     src_h = max(1, int(tokens.get("_src_h") or tokens.get("slide_height") or 1))
@@ -538,7 +694,7 @@ def build_plan(
         if slide.get("_layout_override") is not None:
             layout_index = int(slide["_layout_override"])
         else:
-            layout_index = pick_prototype_layout(tokens, role, _source_pictures(slide))
+            layout_index = pick_prototype_layout(tokens, role, _source_pictures(slide), slide)
         layout = next((l for l in tokens.get("layouts") or [] if int(l["index"]) == layout_index), None)
         proto = next((p for p in tokens.get("prototypes") or [] if int(p["index"]) == layout_index), None)
         layout_name = (proto or layout or {}).get("name")
@@ -566,7 +722,43 @@ def build_plan(
             "placements": placements_for_slide(slide, role, tokens, layout_index),
             "flags": sorted(set(flags)),
         }
-        entries.extend(split_entries_for(entry, tokens))
+        data_pls = [p for p in entry["placements"] if p.get("kind") in {"table", "chart"}]
+        if data_pls and _dense_text_layout(tokens, layout_index):
+            text_entry = json.loads(json.dumps(entry))
+            text_entry["placements"] = [p for p in text_entry["placements"] if p.get("kind") not in {"table", "chart"}]
+            data_entry = json.loads(json.dumps(entry))
+            has_table = any(p.get("kind") == "table" for p in data_pls)
+            data_index = (
+                prototype_index_matching(tokens, "data table", "comparison")
+                if has_table
+                else prototype_index_matching(tokens, "statement slide")
+            )
+            if data_index is None:
+                data_index = layout_index_for_role(tokens, "TITLE_ONLY")
+            data_proto = next(
+                (p for p in tokens.get("prototypes") or [] if int(p["index"]) == int(data_index)),
+                None,
+            )
+            data_layout = next(
+                (item for item in tokens.get("layouts") or [] if int(item["index"]) == int(data_index)),
+                None,
+            )
+            data_entry["role"] = "TITLE_ONLY"
+            data_entry["template_layout_index"] = int(data_index)
+            data_entry["template_layout_name"] = (data_proto or data_layout or {}).get("name")
+            title_pls = [p for p in data_entry["placements"] if p.get("kind") == "title"]
+            if title_pls:
+                base = (title_pls[0].get("text") or "").split("(")[0].strip()
+                title_pls[0]["text"] = f"{base} (cont.)".strip()
+            data_entry["placements"] = title_pls + data_pls
+            data_flags = list(data_entry.get("flags") or [])
+            data_flags.append("SPLIT")
+            data_entry["flags"] = sorted(set(data_flags))
+            data_entry["split"] = {"part": 2, "of": 2, "title_suffix": "(cont.)"}
+            entries.extend(split_entries_for(text_entry, tokens))
+            entries.extend(split_entries_for(data_entry, tokens))
+        else:
+            entries.extend(split_entries_for(entry, tokens))
 
     plan = {
         "entries": entries,

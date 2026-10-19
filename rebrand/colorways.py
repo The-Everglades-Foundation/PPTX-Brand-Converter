@@ -34,6 +34,7 @@ from helpers import (
     enum_name,
     hex_color,
     is_brand_lockup,
+    is_decorative_icon,
     iter_shapes_abs,
     maybe_recompress,
     overlap_fraction,
@@ -1230,6 +1231,137 @@ def purge_sample_photos(slide, tokens: dict[str, Any]) -> None:
             delete_shape(shape)
 
 
+def _placement_is_icon(placement: dict[str, Any], tokens: dict[str, Any] | None = None) -> bool:
+    image = dict(placement.get("image") or {})
+    rec = {
+        **image,
+        "bounds": placement.get("bounds") or {},
+        "area_ratio": placement.get("area_ratio") or 0,
+    }
+    if tokens and not rec.get("area_ratio"):
+        bounds = rec.get("bounds") or {}
+        sw = max(1, int(tokens.get("_src_w") or tokens.get("slide_width") or 1))
+        sh = max(1, int(tokens.get("_src_h") or tokens.get("slide_height") or 1))
+        rec["area_ratio"] = int(bounds.get("width") or 0) * int(bounds.get("height") or 0) / (sw * sh)
+    if is_decorative_icon(rec):
+        return True
+    loaded = _load_picture_blob(placement)
+    if loaded is None:
+        return False
+    blob, img_w, img_h = loaded
+    if rec.get("area_ratio") and float(rec["area_ratio"]) >= 0.08:
+        return False
+    return bool(img_w and img_h and max(int(img_w), int(img_h)) <= 256)
+
+
+def place_icon_pictures(slide, placements: list[dict[str, Any]], tokens: dict[str, Any]) -> None:
+    """Keep tiny UI glyphs small so they never occupy a photo well."""
+    icons: list[tuple[bytes, int | None, int | None]] = []
+    for placement in placements:
+        loaded = _load_picture_blob(placement)
+        if loaded is None:
+            continue
+        icons.append(loaded)
+    if not icons:
+        return
+    slide_w = int(tokens["slide_width"])
+    slide_h = int(tokens["slide_height"])
+    size = int(0.7 * EMU_INCH)
+    gap = int(0.12 * EMU_INCH)
+    texts = _text_boxes(slide)
+    safe = content_safe_box(tokens, tokens.get("_layout_index"))
+    x = int(safe["left"])
+    y = min(int(safe["top"] + safe["height"] - size), int(slide_h - size - 0.35 * EMU_INCH))
+    for blob, img_w, img_h in icons:
+        box = clamp_box_to_slide(
+            {"left": x, "top": y, "width": size, "height": size},
+            slide_w,
+            slide_h,
+        )
+        if any(overlap_fraction(box, text) > 0.12 for text in texts):
+            x += size + gap
+            continue
+        add_unlocked_picture(slide, blob, box, img_w, img_h)
+        x += size + gap
+
+
+def purge_empty_table_chrome(slide, tokens: dict[str, Any]) -> None:
+    """Drop comparison row boards and hairlines once a live table/chart will sit there."""
+    slide_w = int(tokens["slide_width"])
+    for shape in list(slide.shapes):
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            continue
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        if (shape.text_frame.text or "").strip():
+            continue
+        box = _shape_box(shape)
+        wide = box["width"] >= int(slide_w * 0.55)
+        row_bar = wide and int(0.4 * EMU_INCH) <= box["height"] <= int(1.25 * EMU_INCH)
+        hairline = box["height"] <= int(0.06 * EMU_INCH) and box["width"] >= int(slide_w * 0.12)
+        if row_bar or hairline:
+            try:
+                delete_shape(shape)
+            except Exception:
+                continue
+
+
+def promote_text_into_empty_cards(slide, tokens: dict[str, Any]) -> None:
+    """When a photo well was deleted, move column copy up into the empty card."""
+    slide_w = int(tokens["slide_width"])
+    slide_h = int(tokens["slide_height"])
+    pic_boxes = []
+    for shape in slide.shapes:
+        if shape.shape_type in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}:
+            pic_boxes.append(_shape_box(shape))
+    cards: list[tuple[Any, dict[str, int]]] = []
+    for shape in list(slide.shapes):
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            continue
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        if (shape.text_frame.text or "").strip():
+            continue
+        box = _shape_box(shape)
+        if box["width"] < int(2.0 * EMU_INCH) or box["height"] < int(2.0 * EMU_INCH):
+            continue
+        if box["height"] < int(slide_h * 0.22):
+            continue
+        if any(overlap_fraction(box, pic) > 0.20 for pic in pic_boxes):
+            continue
+        cards.append((shape, box))
+    pad = int(0.28 * EMU_INCH)
+    gap = int(0.10 * EMU_INCH)
+    for _card, box in cards:
+        nested = []
+        for shape in list(slide.shapes):
+            if not getattr(shape, "has_text_frame", False):
+                continue
+            text = (shape.text_frame.text or "").strip()
+            if not text:
+                continue
+            other = _shape_box(shape)
+            cx = other["left"] + other["width"] / 2
+            cy = other["top"] + other["height"] / 2
+            if box["left"] <= cx <= box["left"] + box["width"] and box["top"] <= cy <= box["top"] + box["height"]:
+                nested.append(shape)
+        if not nested:
+            continue
+        nested.sort(key=lambda s: int(s.top or 0))
+        y = box["top"] + pad
+        inner_h = box["height"] - 2 * pad
+        share = max(int(0.4 * EMU_INCH), inner_h // max(1, len(nested)))
+        for shape in nested:
+            try:
+                shape.top = int(y)
+                shape.left = int(box["left"] + pad)
+                shape.width = int(max(int(0.8 * EMU_INCH), box["width"] - 2 * pad))
+                shape.height = int(min(int(shape.height or share), share))
+            except Exception:
+                continue
+            y += int(shape.height or share) + gap
+
+
 def place_source_photos(
     slide,
     placements: list[dict[str, Any]],
@@ -1239,8 +1371,11 @@ def place_source_photos(
     """Delete template content frames and add_picture new unlocked pics at that geometry."""
     sources: list[dict[str, Any]] = []
     for placement in placements:
-        if _load_picture_blob(placement) is not None:
-            sources.append(placement)
+        if _load_picture_blob(placement) is None:
+            continue
+        if _placement_is_icon(placement, tokens):
+            continue
+        sources.append(placement)
     slide_w = int(tokens["slide_width"])
     slide_h = int(tokens["slide_height"])
     frames = content_photo_frames(slide, slide_w, slide_h)

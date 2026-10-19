@@ -862,6 +862,41 @@ def crop_cut_fraction(crop: dict[str, int]) -> float:
     return max(0.0, 1 - remain)
 
 
+def is_decorative_icon(shape_or_image: dict[str, Any] | None) -> bool:
+    """True for tiny PptxGenJS / UI glyphs — not photographs for photo wells.
+
+    256px transparent PNGs (document, gear, lightning) must not pick PEOPLE
+    portraits or a full-bleed Kicker well. A low-res blob that already
+    occupies a real photo area on the slide is still a photograph.
+    """
+    if not shape_or_image:
+        return False
+    image = shape_or_image.get("image") if isinstance(shape_or_image.get("image"), dict) else shape_or_image
+    if not isinstance(image, dict):
+        return False
+    try:
+        area = float(shape_or_image.get("area_ratio") or 0)
+    except (TypeError, ValueError):
+        area = 0.0
+    if area >= 0.08:
+        return False
+    px = image.get("px") or [0, 0]
+    try:
+        width, height = int(px[0] or 0), int(px[1] or 0)
+    except (TypeError, ValueError, IndexError):
+        width = height = 0
+    if width and height and max(width, height) <= 256:
+        return True
+    try:
+        nbytes = int(image.get("bytes") or 0)
+    except (TypeError, ValueError):
+        nbytes = 0
+    ext = str(image.get("ext") or image.get("content_type") or "").lower()
+    if width and height and max(width, height) <= 512 and 0 < nbytes < 20000 and "png" in ext:
+        return True
+    return False
+
+
 def is_screenshot_blob(blob: bytes, ext: str, aspect: float) -> bool:
     if ext.lower().lstrip(".") != "png":
         return False
