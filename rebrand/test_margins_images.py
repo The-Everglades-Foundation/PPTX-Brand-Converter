@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests: template margins, unlocked source photos, no leftover sample art."""
+"""Regression tests: template margins, unlocked source photos, unused stock art kept."""
 
 from __future__ import annotations
 
@@ -131,25 +131,41 @@ def _write_source_with_photo(path: Path) -> None:
     prs.save(str(path))
 
 
+def _write_title_and_section_no_photos(path: Path) -> None:
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6]
+    cover = prs.slides.add_slide(blank)
+    title = cover.shapes.add_textbox(Inches(0.5), Inches(2.4), Inches(7.0), Inches(1.4))
+    title.text_frame.paragraphs[0].text = "Claude Usage"
+    subtitle = cover.shapes.add_textbox(Inches(0.5), Inches(4.0), Inches(7.0), Inches(0.8))
+    subtitle.text_frame.paragraphs[0].text = "Executive Summary"
+    section = prs.slides.add_slide(blank)
+    heading = section.shapes.add_textbox(Inches(0.5), Inches(3.0), Inches(8.0), Inches(1.2))
+    heading.text_frame.paragraphs[0].text = "Field Work"
+    prs.save(str(path))
+
+
+def _template_content_photo_hashes(slide_index: int) -> set[str]:
+    prs = Presentation(str(TEMPLATE))
+    frames = content_photo_frames(prs.slides[slide_index], int(prs.slide_width), int(prs.slide_height))
+    return {f["hash"] for f in frames if f.get("hash")}
+
+
 @unittest.skipUnless(TEMPLATE.exists() and SAMPLE.exists(), "template or sample fixture missing")
 class ConvertedDeckTests(unittest.TestCase):
     def _assert_images_editable_and_clean(self, tokens, manifest, output: Path, source_hashes: set[str]):
         prs = Presentation(str(output))
-        sample = set(tokens.get("sample_photo_hashes") or [])
-        logos = set(tokens.get("logo_hashes") or [])
-        leftover = []
         locked_source = []
         source_found = set()
         for slide in prs.slides:
             for shape in _picture_shapes(slide):
                 digest = blob_hash(shape.image.blob)
-                if digest in sample:
-                    leftover.append(digest)
                 if digest in source_hashes:
                     source_found.add(digest)
                     if _pic_locks(shape):
                         locked_source.append(shape.name)
-        self.assertFalse(leftover, "template sample photographs must not remain on rebuilt slides")
         self.assertFalse(locked_source, "source photographs must be unlocked (no picLocks)")
         self.assertEqual(source_found, source_hashes, "every source photograph must be re-inserted")
 
@@ -194,9 +210,9 @@ class ConvertedDeckTests(unittest.TestCase):
             prs = Presentation(str(result["output"]))
             slide = prs.slides[0]
             pics = _picture_shapes(slide)
-            content_pics = [p for p in pics if blob_hash(p.image.blob) not in set(result["tokens"].get("logo_hashes") or [])]
-            self.assertEqual(len(content_pics), 1)
-            pic = content_pics[0]
+            source_pics = [p for p in pics if blob_hash(p.image.blob) in source_hashes]
+            self.assertEqual(len(source_pics), 1)
+            pic = source_pics[0]
             self.assertGreater(int(pic.left), int(prs.slide_width) * 0.4, "photo should occupy the right well, not cover left copy")
             self.assertFalse(_pic_locks(pic))
             # Newly added pictures must not sit on the title/body copy.
@@ -228,7 +244,62 @@ class ConvertedDeckTests(unittest.TestCase):
             cover_pics = _picture_shapes(prs.slides[0])
             cover_hashes = {blob_hash(p.image.blob) for p in cover_pics}
             sample = set(result["tokens"].get("sample_photo_hashes") or [])
-            self.assertFalse(cover_hashes & sample, "cover must not keep leftover sample art")
+            self.assertTrue(cover_hashes & sample, "cover without a source photo keeps the title aerial")
+
+
+@unittest.skipUnless(TEMPLATE.exists(), "official template missing")
+class KeepTemplateStockPhotosTests(unittest.TestCase):
+    def test_unused_wells_keep_title_and_section_stock(self):
+        title_hashes = _template_content_photo_hashes(0)
+        section_hashes = _template_content_photo_hashes(3)
+        self.assertTrue(title_hashes, "template cover must have a stock aerial")
+        self.assertTrue(section_hashes, "template section divider must have a stock photo")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "no-photos.pptx"
+            _write_title_and_section_no_photos(src)
+            result = _convert(TEMPLATE, src, Path(tmp) / "built")
+            prs = Presentation(str(result["output"]))
+            self.assertGreaterEqual(len(prs.slides), 2)
+            cover_hashes = {blob_hash(p.image.blob) for p in _picture_shapes(prs.slides[0])}
+            self.assertTrue(
+                title_hashes & cover_hashes,
+                "converted slide 1 must keep the title-slide aerial when the source has no picture",
+            )
+            interior = prs.slides[1]
+            interior_hashes = {blob_hash(p.image.blob) for p in _picture_shapes(interior)}
+            self.assertTrue(
+                section_hashes & interior_hashes,
+                "converted section divider must keep unused template stock photography",
+            )
+            blob = "\n".join(
+                (shape.text_frame.text or "").strip()
+                for slide in prs.slides
+                for shape in slide.shapes
+                if getattr(shape, "has_text_frame", False)
+            )
+            for dummy in (
+                "Restoring America’s Everglades",
+                "A subtitle line goes here",
+                "Section title goes here",
+                "A sentence framing what this section sets out to do",
+            ):
+                self.assertNotIn(dummy, blob)
+
+    def test_source_picture_still_replaces_its_well(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "right-photo.pptx"
+            _write_source_with_photo(src)
+            result = _convert(TEMPLATE, src, Path(tmp) / "built")
+            source_hashes = {
+                shape["image"]["hash"]
+                for slide in result["manifest"]["slides"]
+                for shape in slide["shapes"]
+                if shape.get("kind") == "picture" and not shape.get("drop_logo")
+            }
+            self.assertEqual(len(source_hashes), 1)
+            prs = Presentation(str(result["output"]))
+            found = {blob_hash(p.image.blob) for p in _picture_shapes(prs.slides[0])}
+            self.assertTrue(source_hashes <= found, "mapped source photograph must replace the well")
 
 
 class SanitizePictureTests(unittest.TestCase):

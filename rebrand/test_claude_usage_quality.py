@@ -21,8 +21,8 @@ REPO = ROOT.parent
 sys.path.insert(0, str(ROOT))
 
 from colorways import is_layout_chrome  # noqa: E402
-from helpers import is_decorative_icon  # noqa: E402
-from test_margins_images import TEMPLATE, _convert  # noqa: E402
+from helpers import blob_hash, is_decorative_icon  # noqa: E402
+from test_margins_images import TEMPLATE, _convert, _template_content_photo_hashes  # noqa: E402
 from test_overlap_layers import LEFTOVER_DUMMY, _assert_no_dummy, _iter_text  # noqa: E402
 
 EMU = 914400
@@ -267,6 +267,12 @@ class ClaudeUsageConvertTests(unittest.TestCase):
         self.assertNotIn("EVERGLADES FOUNDATION", blob)
         self.assertEqual(self._entry(0)["role"], "TITLE")
         self.assertEqual((self._entry(0).get("placements") or [{}])[0].get("text") or "Claude Usage", "Claude Usage")
+        title_hashes = _template_content_photo_hashes(0)
+        cover_hashes = {blob_hash(p.image.blob) for p in _picture_shapes(cover)}
+        self.assertTrue(
+            title_hashes & cover_hashes,
+            "cover with no source photo must keep the template title-slide aerial",
+        )
 
     def test_overview_is_not_people_portraits(self):
         overview = next(s for s in self.prs.slides if "Overview" in "\n".join(_iter_text(s)))
@@ -278,15 +284,20 @@ class ClaudeUsageConvertTests(unittest.TestCase):
         self.assertTrue("CONTENTS" in blob or "SEQUENCE" in blob)
         self.assertIn("13 / 19", blob)
         self.assertIn("Time Saved", blob)
+        logos = set(self.result["tokens"].get("logo_hashes") or [])
+        sample = set(self.result["tokens"].get("sample_photo_hashes") or [])
         for pic in _picture_shapes(overview):
+            digest = blob_hash(pic.image.blob)
+            if digest in logos or digest in sample:
+                continue
             self.assertLess(
                 int(pic.width or 0),
                 int(1.5 * EMU),
                 "256px icons must not occupy 4-inch portrait wells",
             )
             try:
-                blob = pic.image.blob
-                with Image.open(io.BytesIO(blob)) as im:
+                pic_blob = pic.image.blob
+                with Image.open(io.BytesIO(pic_blob)) as im:
                     px = max(im.size)
             except Exception:
                 px = 9999
@@ -400,6 +411,31 @@ class ClaudeUsageConvertTests(unittest.TestCase):
         self.assertGreaterEqual(len(who_entries), 2)
         text_names = " ".join((e.get("template_layout_name") or "") for e in who_entries)
         self.assertTrue("Three Parts" in text_names or "Comparison" in text_names or "The Point" in text_names)
+
+    def test_interior_unused_wells_keep_stock_photos(self):
+        sample = set(self.result["tokens"].get("sample_photo_hashes") or [])
+        logos = set(self.result["tokens"].get("logo_hashes") or [])
+        three_parts = _template_content_photo_hashes(7)
+        two_points = _template_content_photo_hashes(8)
+        interior_stock = (three_parts | two_points) & sample
+        self.assertTrue(interior_stock)
+        found = set()
+        for index, slide in enumerate(self.prs.slides):
+            if index == 0:
+                continue
+            blob = "\n".join(_iter_text(slide))
+            if "THREE PARTS" not in blob and "TWO POINTS" not in blob:
+                continue
+            for pic in _picture_shapes(slide):
+                digest = blob_hash(pic.image.blob)
+                if digest in logos:
+                    continue
+                if digest in interior_stock:
+                    found.add(digest)
+        self.assertTrue(
+            found,
+            "an interior layout with no source photograph must keep its template stock photos",
+        )
 
 
 if __name__ == "__main__":

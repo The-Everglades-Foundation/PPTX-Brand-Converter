@@ -258,6 +258,7 @@ def image_parity(manifest: dict[str, Any], out_prs, tokens: dict[str, Any] | Non
             else:
                 src += 1
     logos = set((tokens or {}).get("logo_hashes") or [])
+    sample = set((tokens or {}).get("sample_photo_hashes") or [])
     out = 0
     for slide in out_prs.slides:
         for shape in slide.shapes:
@@ -269,6 +270,8 @@ def image_parity(manifest: dict[str, Any], out_prs, tokens: dict[str, Any] | Non
             except Exception:
                 digest = None
             if digest and digest in logos:
+                continue
+            if digest and digest in sample:
                 continue
             out += 1
     return src, out, dropped
