@@ -22,7 +22,11 @@ from colorways import (  # noqa: E402
     duplicate_slide,
     fill_text_slots,
     patch_theme_part,
+    place_icon_pictures,
     place_source_photos,
+    promote_text_into_empty_cards,
+    purge_empty_table_chrome,
+    _placement_is_icon,
     remap_srgb_in_slide,
     sanitize_new_picture,
     stack_copy_above_photos,
@@ -33,6 +37,9 @@ from helpers import (  # noqa: E402
     apply_picture_crop,
     apply_round_rect,
     apply_run_style,
+    as_box,
+    box_bottom,
+    clamp_box_to_slide,
     contain_fit,
     content_safe_box,
     crop_cut_fraction,
@@ -46,6 +53,7 @@ from helpers import (  # noqa: E402
     layout_index_for_role,
     load_json,
     maybe_recompress,
+    overlap_fraction,
     parse_brand_md,
     recreate_sections,
     reduce_title_size,
@@ -237,6 +245,83 @@ def _post_style_picture(picture, blob: bytes, ext: str, img_w: int, img_h: int, 
         apply_line(picture, tint(theme_color(tokens, "dk2"), 0.50), 0.75)
 
 
+def _occupied_text_boxes(slide) -> list[dict[str, int]]:
+    boxes: list[dict[str, int]] = []
+    for shape in slide.shapes:
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        text = (shape.text_frame.text or "").strip()
+        if not text:
+            continue
+        boxes.append(
+            {
+                "left": int(shape.left or 0),
+                "top": int(shape.top or 0),
+                "width": int(shape.width or 0),
+                "height": int(shape.height or 0),
+            }
+        )
+    return boxes
+
+
+def _data_box(slide, tokens: dict[str, Any], min_height: int, kind: str = "table") -> dict[str, int]:
+    """Place tables/charts below chrome and copy, not on top of prototype wells."""
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    slide_w = int(tokens["slide_width"])
+    slide_h = int(tokens["slide_height"])
+    safe = content_safe_box(tokens, tokens.get("_layout_index"))
+    texts = _occupied_text_boxes(slide)
+    top = int(safe["top"])
+    for box in texts:
+        if box["top"] < int(slide_h * 0.32):
+            top = max(top, box["top"] + box["height"] + int(0.18 * 914400))
+    charts = []
+    tables = []
+    for shape in slide.shapes:
+        box = {
+            "left": int(shape.left or 0),
+            "top": int(shape.top or 0),
+            "width": int(shape.width or 0),
+            "height": int(shape.height or 0),
+        }
+        if shape.shape_type == MSO_SHAPE_TYPE.CHART:
+            charts.append(box)
+        elif shape.shape_type == MSO_SHAPE_TYPE.TABLE:
+            tables.append(box)
+    body = as_box(int(safe["left"]), int(top), int(safe["width"]), max(min_height, int(safe["top"] + safe["height"] - top)))
+    gap = int(0.18 * 914400)
+    if kind == "chart" and not charts:
+        if tables:
+            body["width"] = int(body["width"] * 0.48)
+        return clamp_box_to_slide(body, slide_w, slide_h)
+    if kind == "table":
+        if charts and not tables:
+            left = int(charts[0]["left"] + charts[0]["width"] + gap)
+            return clamp_box_to_slide(
+                as_box(left, int(body["top"]), int(safe["left"] + safe["width"] - left), int(body["height"])),
+                slide_w,
+                slide_h,
+            )
+        if tables:
+            last = max(tables, key=lambda b: b["top"] + b["height"])
+            top2 = int(last["top"] + last["height"] + gap)
+            return clamp_box_to_slide(
+                as_box(int(last["left"]), top2, int(last["width"]), max(min_height, int(slide_h - int(0.35 * 914400) - top2))),
+                slide_w,
+                slide_h,
+            )
+    body_texts = [b for b in texts if b["top"] >= int(slide_h * 0.28)]
+    if body_texts and any(overlap_fraction(body, b) > 0.12 for b in body_texts):
+        lowest = max(box_bottom(b) for b in texts)
+        body["top"] = int(lowest + gap)
+        body["height"] = int(slide_h - int(0.35 * 914400) - body["top"])
+    if body["height"] < min_height:
+        body["top"] = max(int(safe["top"]), int(slide_h - min_height - 0.35 * 914400))
+        body["height"] = max(min_height, int(slide_h - int(0.28 * 914400) - body["top"]))
+    return clamp_box_to_slide(body, slide_w, slide_h)
+
+
 def add_table_placement(slide, placement: dict[str, Any], tokens: dict[str, Any], brand: dict[str, Any]) -> None:
     chunk = placement.get("table_chunk")
     table_info = placement.get("table") or {}
@@ -252,15 +337,8 @@ def add_table_placement(slide, placement: dict[str, Any], tokens: dict[str, Any]
         return
     nrows = len(cells)
     ncols = max(len(r) for r in cells)
-    safe = content_safe_box(tokens, tokens.get("_layout_index"))
-    src_box = placement.get("bounds") or safe
-    box = scale_geometry(src_box, {"width": tokens.get("_src_w"), "height": tokens.get("_src_h")}, tokens, tokens.get("_layout_index"))
-    # Prefer the full content-safe width for tables.
-    box["left"] = safe["left"]
-    box["width"] = safe["width"]
-    box["top"] = max(safe["top"], box["top"])
     min_h = int(0.28 * 914400) * nrows
-    box["height"] = max(min_h, min(box["height"], safe["top"] + safe["height"] - box["top"]))
+    box = _data_box(slide, tokens, min_h, kind="table")
     graphic = slide.shapes.add_table(nrows, ncols, int(box["left"]), int(box["top"]), int(box["width"]), int(box["height"]))
     table = graphic.table
     widths = table_info.get("col_widths") or []
@@ -302,16 +380,19 @@ def add_table_placement(slide, placement: dict[str, Any], tokens: dict[str, Any]
 
 def add_chart_placement(slide, placement: dict[str, Any], tokens: dict[str, Any], brand: dict[str, Any], flags: list[str], work: dict[str, Any]) -> None:
     chart = placement.get("chart") or {}
-    safe = content_safe_box(tokens, tokens.get("_layout_index"))
-    box = placement.get("bounds")
-    if box:
-        box = scale_geometry(box, {"width": tokens.get("_src_w"), "height": tokens.get("_src_h")}, tokens, tokens.get("_layout_index"))
-    else:
-        box = dict(safe)
-    box["left"] = max(box["left"], safe["left"])
-    box["top"] = max(box["top"], safe["top"])
-    box["width"] = min(box["width"], safe["left"] + safe["width"] - box["left"])
-    box["height"] = min(box["height"], safe["top"] + safe["height"] - box["top"])
+    min_h = int(3.2 * 914400)
+    box = _data_box(slide, tokens, min_h, kind="chart")
+    src_box = placement.get("bounds")
+    if src_box:
+        scaled = scale_geometry(
+            src_box,
+            {"width": tokens.get("_src_w"), "height": tokens.get("_src_h")},
+            tokens,
+            tokens.get("_layout_index"),
+        )
+        # Keep source aspect if it still fits in the free region.
+        box["width"] = min(int(scaled.get("width") or box["width"]), int(box["width"]))
+        box["height"] = min(int(scaled.get("height") or box["height"]), int(box["height"]))
     if chart.get("external") or not chart.get("supported"):
         flags.append("NEEDS_MANUAL_REBUILD")
         raster = work.get("chart_rasters", {}).get(str(placement.get("shape_id")))
@@ -342,6 +423,13 @@ def add_chart_placement(slide, placement: dict[str, Any], tokens: dict[str, Any]
 
 
 def add_callout(slide, placement: dict[str, Any], tokens: dict[str, Any], brand: dict[str, Any]) -> None:
+    paras = placement.get("paragraphs") or []
+    text = " ".join((p.get("text") or "").strip() for p in paras if (p.get("text") or "").strip())
+    if not text.strip():
+        return
+    bounds = placement.get("bounds") or {}
+    if int(bounds.get("width") or 0) < int(0.08 * 914400) or int(bounds.get("height") or 0) < int(0.08 * 914400):
+        return
     box = scale_geometry(
         placement.get("bounds") or content_safe_box(tokens, tokens.get("_layout_index")),
         {"width": tokens.get("_src_w"), "height": tokens.get("_src_h")},
@@ -450,13 +538,24 @@ def fill_prototype_slide(slide, entry: dict[str, Any], tokens: dict[str, Any], b
             deferred.append(placement)
     fill_text_slots(slide, title, subtitle, body_paras)
     pictures: list[dict[str, Any]] = []
+    icons: list[dict[str, Any]] = []
     rest_deferred: list[dict[str, Any]] = []
     for placement in deferred:
         if placement.get("kind") == "picture":
-            pictures.append(placement)
+            if _placement_is_icon(placement, tokens):
+                icons.append(placement)
+            else:
+                pictures.append(placement)
         else:
             rest_deferred.append(placement)
     place_source_photos(slide, pictures, tokens, flags)
+    place_icon_pictures(slide, icons, tokens)
+    promote_text_into_empty_cards(slide, tokens)
+    if any(p.get("kind") in {"table", "chart"} for p in rest_deferred):
+        purge_empty_table_chrome(slide, tokens)
+    rest_deferred.sort(
+        key=lambda p: 0 if p.get("kind") == "chart" else 1 if p.get("kind") == "table" else 2
+    )
     for placement in rest_deferred:
         kind = placement.get("kind")
         if kind == "table":

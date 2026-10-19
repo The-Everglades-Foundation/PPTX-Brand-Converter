@@ -23,6 +23,7 @@ from helpers import (  # noqa: E402
     extract_smartart_text,
     extract_table,
     has_timing,
+    is_decorative_icon,
     is_edge_logo,
     is_footer_shape,
     is_line_or_arrow,
@@ -137,6 +138,7 @@ def inspect_shape(shape, left: int, top: int, slide_w: int, slide_h: int, media_
 def classify_source_slide(index: int, total: int, title: str, subtitle: str, shapes: list[dict[str, Any]], slide_w: int, slide_h: int) -> str:
     content = [s for s in shapes if not s.get("drop_footer") and s.get("kind") != "group"]
     pictures = [s for s in content if s.get("kind") == "picture"]
+    photos = [s for s in pictures if not is_decorative_icon(s)]
     tables = [s for s in content if s.get("kind") == "table"]
     charts = [s for s in content if s.get("kind") == "chart"]
     title_norm = (title or "").strip()
@@ -153,13 +155,19 @@ def classify_source_slide(index: int, total: int, title: str, subtitle: str, sha
     last_blob = f"{title} {subtitle} {body_text}"
 
     # Title + subtitle only, or first-slide cover
-    if title and subtitle and not body_text and not tables and not charts and not pictures:
+    if title and subtitle and not body_text and not tables and not charts and not photos:
         return "TITLE"
+    # Cover: first slide, no tables/charts, no dominating photograph.
+    # Side-by-side title/subtitle/tagline boxes (PptxGenJS) are not TWO_CONTENT.
+    if index == 0 and not tables and not charts:
+        dominating = [p for p in photos if (p.get("area_ratio") or 0) > 0.5]
+        if not dominating:
+            return "TITLE"
     if (
         index == 0
         and not tables
         and not charts
-        and not pictures
+        and not photos
         and len(text_blocks) <= 1
         and len(body_text) < 280
     ):
@@ -175,12 +183,12 @@ def classify_source_slide(index: int, total: int, title: str, subtitle: str, sha
     if index == total - 1 and CONTACT_LIKE(last_blob):
         return "CLOSING"
 
-    if pictures:
-        dominating = [p for p in pictures if p.get("area_ratio", 0) > 0.5]
+    if photos:
+        dominating = [p for p in photos if p.get("area_ratio", 0) > 0.5]
         if dominating and len(text_blocks) <= 2:
             return "PICTURE"
         caption_only = len(body_text.split()) <= 16
-        large = [p for p in pictures if p.get("area_ratio", 0) > 0.28]
+        large = [p for p in photos if p.get("area_ratio", 0) > 0.28]
         if large and caption_only and not tables and not charts:
             return "PICTURE"
 
@@ -190,11 +198,14 @@ def classify_source_slide(index: int, total: int, title: str, subtitle: str, sha
         if s.get("kind") in {"text", "picture", "table"}
         and (s.get("placeholder_type") or "") not in TITLE_TYPE_NAMES | SUBTITLE_TYPE_NAMES
         and not s.get("drop_footer")
+        and not (s.get("kind") == "picture" and is_decorative_icon(s))
     ]
     if _two_side_by_side(spatial_blocks, slide_w):
         return "TWO_CONTENT"
 
     if (tables or charts) and len(text_blocks) <= 1:
+        if body_text and len(body_text.split()) > 12:
+            return "TITLE_BODY"
         return "TITLE_ONLY"
 
     if title and len(text_blocks) == 1 and not tables and not charts and not pictures:
