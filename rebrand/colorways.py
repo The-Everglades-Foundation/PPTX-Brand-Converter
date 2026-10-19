@@ -64,6 +64,46 @@ EF_WHITELIST = [
 
 SKIP_PROTOTYPE_HINTS = ("notes for staff", "how to use this template", "internal reference")
 
+# Layout labels that belong on the rebuilt slide (not dummy wells).
+LAYOUT_CHROME_LABELS = {
+    "PRESENTATION TITLE",
+    "CONTENTS",
+    "THE POINT",
+    "BY THE NUMBERS",
+    "KICKER",
+    "THREE PARTS",
+    "TWO POINTS",
+    "COMPARISON",
+    "SEQUENCE",
+    "PEOPLE",
+    "NOTES FOR STAFF",
+    "BRAND PALETTE",
+    "CAPTION",
+}
+HEADING_DUMMY_LABELS = {
+    "bullet one",
+    "bullet two",
+    "concept one",
+    "concept two",
+    "concept three",
+    "section title here",
+    "step title",
+    "full name",
+    "title, team",
+    "row label",
+    "label here",
+    "column one",
+    "column two",
+    "column three",
+    "column four",
+    "phase one",
+    "phase two",
+    "phase three",
+    "phase four",
+    "name of speaker",
+}
+EMU_INCH = 914400
+
 
 def _base_theme(major: str, minor: str, accent1: str, accent2: str) -> dict[str, Any]:
     return {
@@ -748,70 +788,222 @@ def prototype_text_slots(slide) -> list[dict[str, Any]]:
     return slots
 
 
+def is_layout_chrome(text: str) -> bool:
+    """True for brand lockup labels / index badges that must stay on the sample slide."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t in LAYOUT_CHROME_LABELS:
+        return True
+    if re.fullmatch(r"0?\d{1,2}", t):
+        return True
+    if t in {'"', "“", "”", "'", "‘", "’"}:
+        return True
+    if "evergladesfoundation.org" in t.lower():
+        return True
+    return False
+
+
+def _write_paragraph_text(para, text: str) -> None:
+    if para.runs:
+        para.runs[0].text = text
+        for run in para.runs[1:]:
+            run.text = ""
+    else:
+        para.text = text
+    nodes = para._p.findall(f".//{{{A_NS}}}t")
+    if nodes:
+        nodes[0].text = text
+        for node in nodes[1:]:
+            node.text = ""
+    elif text:
+        para.text = text
+
+
 def replace_shape_text(shape, text: str) -> None:
+    """Replace visible copy and wipe leftover prototype paragraphs in the same frame."""
     if not getattr(shape, "has_text_frame", False):
         return
     tf = shape.text_frame
     tf.word_wrap = True
-    first = tf.paragraphs[0]
-    if first.runs:
-        first.runs[0].text = text
-        for run in first.runs[1:]:
-            run.text = ""
+    parts = [p for p in str(text).split("\n")] if text else [""]
+    if not parts:
+        parts = [""]
+    while len(tf.paragraphs) < len(parts):
+        tf.add_paragraph()
+    for i, para in enumerate(tf.paragraphs):
+        value = parts[i] if i < len(parts) else ""
+        _write_paragraph_text(para, value)
+
+
+def clear_shape_text(shape) -> None:
+    replace_shape_text(shape, "")
+
+
+def _looks_like_heading_slot(slot: dict[str, Any]) -> bool:
+    t = (slot.get("text") or "").strip()
+    if t.lower() in HEADING_DUMMY_LABELS:
+        return True
+    height = int(slot.get("height") or 0)
+    if height <= int(0.7 * EMU_INCH) and len(t) <= 48 and "\n" not in t:
+        return True
+    return False
+
+
+def _cluster_columns(slots: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    if not slots:
+        return []
+    ordered = sorted(slots, key=lambda s: (int(s["left"]), int(s["top"])))
+    groups: list[list[dict[str, Any]]] = [[ordered[0]]]
+    for slot in ordered[1:]:
+        col = groups[-1]
+        col_left = min(int(s["left"]) for s in col)
+        col_right = max(int(s["left"]) + int(s["width"]) for s in col)
+        center = int(slot["left"]) + int(slot["width"]) / 2
+        col_center = (col_left + col_right) / 2
+        if int(slot["left"]) >= col_right - int(0.2 * EMU_INCH) and center - col_center >= 1.2 * EMU_INCH:
+            groups.append([slot])
+        else:
+            col.append(slot)
+    return groups
+
+
+def _split_into(items: list[str], n: int) -> list[list[str]]:
+    if n <= 1:
+        return [items]
+    if len(items) >= n * 2 and len(items) % 2 == 0:
+        pairs = list(zip(items[0::2], items[1::2]))
+        base, extra = divmod(len(pairs), n)
+        chunks: list[list[str]] = []
+        i = 0
+        for ci in range(n):
+            take = base + (1 if ci < extra else 0)
+            chunk_pairs = pairs[i : i + take]
+            i += take
+            chunks.append([part for pair in chunk_pairs for part in pair])
+        return chunks
+    base, extra = divmod(len(items), n)
+    chunks = []
+    i = 0
+    for ci in range(n):
+        take = base + (1 if ci < extra else 0)
+        chunks.append(items[i : i + take])
+        i += take
+    return chunks
+
+
+def _fill_body_stack(slots: list[dict[str, Any]], texts: list[str]) -> list[Any]:
+    """Write body into one well; delete stacked dummy frames in the same column."""
+    to_delete: list[Any] = []
+    if not slots:
+        return to_delete
+    slots = sorted(slots, key=lambda s: (int(s["top"]), int(s["left"])))
+    primary = slots[0]
+    if len(slots) > 1:
+        bottom = max(int(s["top"]) + int(s["height"]) for s in slots)
+        right = max(int(s["left"]) + int(s["width"]) for s in slots)
+        try:
+            primary["shape"].height = int(bottom - int(primary["top"]))
+            primary["shape"].width = int(max(int(primary["width"]), right - int(primary["left"])))
+        except Exception:
+            pass
+        for extra in slots[1:]:
+            clear_shape_text(extra["shape"])
+            to_delete.append(extra["shape"])
+    if texts:
+        replace_shape_text(primary["shape"], "\n".join(texts))
     else:
-        first.text = text
-    for para in tf.paragraphs[1:]:
-        for run in para.runs:
-            run.text = ""
+        clear_shape_text(primary["shape"])
+        to_delete.append(primary["shape"])
+    return to_delete
+
+
+def _fill_column(slots: list[dict[str, Any]], texts: list[str]) -> list[Any]:
+    if not slots:
+        return []
+    slots = sorted(slots, key=lambda s: (int(s["top"]), int(s["left"])))
+    if not texts:
+        deleted = []
+        for slot in slots:
+            clear_shape_text(slot["shape"])
+            deleted.append(slot["shape"])
+        return deleted
+    if _looks_like_heading_slot(slots[0]) and len(slots) >= 2:
+        replace_shape_text(slots[0]["shape"], texts[0])
+        return _fill_body_stack(slots[1:], texts[1:])
+    return _fill_body_stack(slots, texts)
 
 
 def fill_text_slots(slide, title: str, subtitle: str, body_paras: list[str]) -> None:
+    """Write source copy into content wells; keep layout chrome; drop leftover dummy."""
     slots = prototype_text_slots(slide)
     if not slots:
         return
-    # Kicker = short uppercase first line; title = next; rest = body.
-    kicker = None
-    rest = list(slots)
-    first = rest[0]
-    if len(first["text"]) <= 24 and first["text"] == first["text"].upper() and not first["text"].isdigit():
-        kicker = rest.pop(0)
-    title_slot = rest.pop(0) if rest else None
-    if title_slot is None and kicker is not None:
-        title_slot = kicker
-        kicker = None
-    if title_slot is not None and title:
-        replace_shape_text(title_slot["shape"], title)
-    elif title_slot is not None:
-        replace_shape_text(title_slot["shape"], title_slot["text"] if not title else title)
-    body_texts = []
+    content = [s for s in slots if not is_layout_chrome(s["text"])]
+    title_slot = content.pop(0) if content else None
+    if title_slot is not None:
+        replace_shape_text(title_slot["shape"], title or "")
+        if not title:
+            delete_shape(title_slot["shape"])
+            title_slot = None
+    body_texts: list[str] = []
     if subtitle:
         body_texts.append(subtitle)
     body_texts.extend([p for p in body_paras if p])
-    # TWO_CONTENT: split remaining slots by x midpoint
-    if len(rest) >= 2 and len(body_texts) >= 2:
-        mid = (min(s["left"] for s in rest) + max(s["left"] + s["width"] for s in rest)) / 2
-        left_slots = [s for s in rest if s["left"] + s["width"] / 2 < mid]
-        right_slots = [s for s in rest if s not in left_slots]
-        half = max(1, len(body_texts) // 2)
-        _fill_slot_group(left_slots, body_texts[:half])
-        _fill_slot_group(right_slots, body_texts[half:])
-        return
-    _fill_slot_group(rest, body_texts)
+    to_delete: list[Any] = []
+    columns = _cluster_columns(content)
+    if len(columns) >= 2 and len(body_texts) >= 2:
+        for col, chunk in zip(columns, _split_into(body_texts, len(columns))):
+            to_delete.extend(_fill_column(col, chunk))
+    else:
+        to_delete.extend(_fill_column(content, body_texts))
+    for shape in to_delete:
+        try:
+            delete_shape(shape)
+        except Exception:
+            continue
 
 
-def _fill_slot_group(slots: list[dict[str, Any]], texts: list[str]) -> None:
-    if not slots:
+def stack_copy_above_photos(slide, tokens: dict[str, Any]) -> None:
+    """Keep photos in front of empty cards, but never covering source copy."""
+    slide_w = int(tokens["slide_width"])
+    slide_h = int(tokens["slide_height"])
+    slide_area = max(1, slide_w * slide_h)
+    pictures = []
+    for shape in list(slide.shapes):
+        if shape.shape_type not in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}:
+            continue
+        box = _shape_box(shape)
+        if is_brand_lockup(
+            box["width"] * box["height"],
+            slide_area,
+            box["left"],
+            box["top"],
+            box["width"],
+            box["height"],
+            slide_w,
+            slide_h,
+        ):
+            continue
+        pictures.append(shape)
+    for shape in pictures:
+        bring_picture_to_front(shape)
+    pic_boxes = [_shape_box(s) for s in pictures]
+    if not pic_boxes:
         return
-    if not texts:
-        # Leave sample copy rather than emptying chrome labels like 01 / COLUMN ONE
-        return
-    for i, slot in enumerate(slots):
-        if i < len(texts):
-            value = texts[i]
-            if i == len(slots) - 1 and len(texts) > len(slots):
-                value = "\n".join(texts[i:])
-            replace_shape_text(slot["shape"], value)
-        # extra decorative slots keep template copy
+    for shape in list(slide.shapes):
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        text = (shape.text_frame.text or "").strip()
+        if not text:
+            continue
+        box = _shape_box(shape)
+        if any(overlap_fraction(box, pic) > 0.08 for pic in pic_boxes):
+            el = shape._element
+            parent = el.getparent()
+            if parent is not None:
+                parent.remove(el)
+                parent.append(el)
 
 
 def strip_pic_locks(element) -> None:
