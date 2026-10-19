@@ -20,15 +20,18 @@ sys.path.insert(0, str(ROOT))
 
 from helpers import (  # noqa: E402
     blob_hash,
+    char_width_factor,
     is_metric_line,
     is_title_like,
     looks_like_metric_pairs,
     looks_like_photo_caption,
     pair_metric_label_items,
+    reduce_title_size,
     title_candidate_score,
+    words_fit_line,
 )
+from test_margins_images import KNIGHT, TEMPLATE, _convert, _template_content_photo_hashes  # noqa: E402
 from inspect_source import pick_title  # noqa: E402
-from test_margins_images import KNIGHT, TEMPLATE, _convert  # noqa: E402
 from test_overlap_layers import _assert_no_dummy, _iter_text  # noqa: E402
 from colorways import is_layout_chrome  # noqa: E402
 
@@ -321,6 +324,60 @@ class HelperTests(unittest.TestCase):
         title, _sub = pick_title(shapes)
         self.assertEqual(title, "WAYS TO PARTNER")
 
+    def test_foreverglades_cover_title_does_not_orphan_letter(self):
+        """78pt ALL-CAPS FOREVERGLADES is wider than the official 8.36″ title well."""
+        box_w = int(8.36 * EMU)
+        box_h = int(3.36 * EMU)
+        self.assertGreater(char_width_factor("FOREVERGLADES"), 0.6)
+        self.assertFalse(words_fit_line("FOREVERGLADES", 78, box_w))
+        size = reduce_title_size("FOREVERGLADES", box_w, box_h, 78, max_lines=2, fit_height=True)
+        self.assertLess(size, 78)
+        self.assertTrue(words_fit_line("FOREVERGLADES", size, box_w))
+        two = reduce_title_size("INTRODUCING FOREVERGLADES", box_w, box_h, 78, max_lines=2)
+        self.assertTrue(words_fit_line("INTRODUCING FOREVERGLADES", two, box_w))
+        self.assertLessEqual(two, 78)
+
+
+def _mosaic_tile(color: tuple[int, int, int], size: tuple[int, int]) -> bytes:
+    return _jpeg(color, size)
+
+
+def write_knight_title_source(path: Path) -> None:
+    """Cover titled FOREVERGLADES plus a right-side photo collage (overflow case)."""
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6]
+    cover = prs.slides.add_slide(blank)
+    title = cover.shapes.add_textbox(Inches(0.5), Inches(2.4), Inches(6.4), Inches(1.4))
+    title.text_frame.paragraphs[0].text = "FOREVERGLADES"
+    sub = cover.shapes.add_textbox(Inches(0.5), Inches(4.0), Inches(6.4), Inches(0.6))
+    sub.text_frame.paragraphs[0].text = "For the Knight Foundation"
+    # Landscape mosaic + two extra tiles — overflow used to double the official collage.
+    cover.shapes.add_picture(io.BytesIO(_mosaic_tile((20, 70, 90), (1800, 720))), Inches(7.0), Inches(0.2), Inches(6.1), Inches(4.4))
+    cover.shapes.add_picture(io.BytesIO(_mosaic_tile((40, 90, 50), (640, 420))), Inches(7.0), Inches(4.8), Inches(3.0), Inches(2.4))
+    cover.shapes.add_picture(io.BytesIO(_mosaic_tile((110, 80, 30), (640, 420))), Inches(10.2), Inches(4.8), Inches(2.9), Inches(2.4))
+    prs.save(str(path))
+
+
+def _title_shape(slide):
+    for shape in slide.shapes:
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        if (shape.text_frame.text or "").strip() == "FOREVERGLADES":
+            return shape
+    return None
+
+
+def _shape_font_pt(shape) -> float | None:
+    if shape is None or not getattr(shape, "has_text_frame", False):
+        return None
+    for para in shape.text_frame.paragraphs:
+        for run in para.runs:
+            if run.font.size is not None:
+                return float(run.font.size.pt)
+    return None
+
 
 @unittest.skipUnless(TEMPLATE.exists(), "official template missing")
 class KnightForevergladesConvertTests(unittest.TestCase):
@@ -483,6 +540,90 @@ class UserKnightConvertAsSourceTests(unittest.TestCase):
     def test_user_partner_title_is_ways_to_partner(self):
         slide = next(s for s in self.prs.slides if "Flexible giving" in _slide_blob(s))
         _assert_partner_title_and_cards(self, slide)
+
+
+@unittest.skipUnless(TEMPLATE.exists(), "official template missing")
+class KnightTitleSlideTests(unittest.TestCase):
+    """Cover titled FOREVERGLADES must not orphan S or overlay a second collage."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.src = Path(cls.tmp.name) / "knight-title.pptx"
+        write_knight_title_source(cls.src)
+        cls.result = _convert(TEMPLATE, cls.src, Path(cls.tmp.name) / "built")
+        cls.prs = Presentation(str(cls.result["output"]))
+        cls.cover = cls.prs.slides[0]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_cover_title_is_foreverglades_on_one_line(self):
+        blob = _slide_blob(self.cover)
+        _assert_no_dummy(self.cover, "knight title")
+        self.assertIn("PRESENTATION TITLE", blob)
+        self.assertIn("FOREVERGLADES", blob)
+        self.assertIn("For the Knight Foundation", blob)
+        title = _title_shape(self.cover)
+        self.assertIsNotNone(title, "FOREVERGLADES must occupy the cover title well")
+        self.assertNotIn("\n", (title.text_frame.text or ""))
+        self.assertGreater(int(title.width or 0), int(6.0 * EMU))
+        self.assertLess(int(title.left or 0) + int(title.width or 0), int(10.2 * EMU), "title stays in the left well")
+        size = _shape_font_pt(title)
+        self.assertIsNotNone(size)
+        self.assertLess(size, 78, "cover title must shrink from the 78pt prototype")
+        self.assertTrue(words_fit_line("FOREVERGLADES", size, int(title.width or 0)))
+        well_pt = int(title.width or 0) / EMU * 72
+        self.assertLessEqual(13 * size * 0.70, well_pt + 12, "FOREVERGLADES must fit the well without orphaning S")
+
+    def test_cover_keeps_official_hero_no_overflow_mosaic(self):
+        official = _template_content_photo_hashes(0)
+        self.assertTrue(official, "template cover must expose the official hero collage")
+        slide_w = int(self.prs.slide_width)
+        pics = [
+            s
+            for s in self.cover.shapes
+            if s.shape_type in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}
+        ]
+        hashes = set()
+        content_pics = []
+        for pic in pics:
+            try:
+                digest = blob_hash(pic.image.blob)
+            except Exception:
+                continue
+            hashes.add(digest)
+            left = int(pic.left or 0)
+            if left >= int(slide_w * 0.35):
+                content_pics.append(pic)
+            else:
+                # Brand lockup stays on the cream panel; source tiles must not.
+                self.assertLess(
+                    int(pic.width or 0) * int(pic.height or 0),
+                    int(4.0 * EMU) * int(3.0 * EMU),
+                    "source collage must not spill onto the cream title panel",
+                )
+        self.assertTrue(official & hashes, "fitting the source mosaic looks worse — keep the official title-slide image")
+        source_hashes = {
+            shape["image"]["hash"]
+            for slide in self.result["manifest"]["slides"]
+            for shape in slide["shapes"]
+            if shape.get("kind") == "picture" and not shape.get("drop_logo") and not shape.get("drop_icon")
+        }
+        self.assertFalse(
+            source_hashes & hashes,
+            "do not overlay a second cover collage on the official hero well",
+        )
+        self.assertEqual(len(content_pics), 1, "one official hero well, not a double mosaic")
+        hero = content_pics[0]
+        self.assertGreaterEqual(int(hero.left or 0), int(slide_w * 0.49))
+        self.assertLessEqual(int(hero.left or 0) + int(hero.width or 0), slide_w + int(0.05 * EMU))
+        self.assertLessEqual(int(hero.top or 0), int(0.05 * EMU))
+        self.assertGreaterEqual(int(hero.height or 0), int(self.prs.slide_height) - int(0.1 * EMU))
+        entry = self.result["plan"]["entries"][0]
+        self.assertEqual(entry.get("role"), "TITLE")
+        self.assertNotIn("PICTURE_OVERFLOW", entry.get("flags") or [])
 
 
 @unittest.skipUnless(TEMPLATE.exists() and KNIGHT.exists(), "Knight store fixture missing")

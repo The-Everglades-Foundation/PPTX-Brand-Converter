@@ -31,6 +31,7 @@ from helpers import (
     classify_layout_role,
     clamp_box_to_slide,
     contain_fit,
+    contain_leftover_fraction,
     content_safe_box,
     cover_crop,
     is_banner_photo_well,
@@ -38,6 +39,7 @@ from helpers import (
     enum_name,
     estimate_lines,
     fits,
+    reduce_title_size,
     hex_color,
     is_brand_lockup,
     is_decorative_icon,
@@ -882,6 +884,44 @@ def replace_shape_text(shape, text: str) -> None:
         _write_paragraph_text(para, value)
 
 
+def _apply_font_size(shape, size_pt: float) -> None:
+    if not getattr(shape, "has_text_frame", False):
+        return
+    for para in shape.text_frame.paragraphs:
+        for run in para.runs:
+            try:
+                run.font.size = Pt(size_pt)
+            except Exception:
+                continue
+
+
+def fit_title_in_slot(shape, text: str) -> None:
+    """Shrink a prototype title so ALL-CAPS words stay on one line (no orphan letter)."""
+    if not getattr(shape, "has_text_frame", False) or not (text or "").strip():
+        return
+    box_w = int(shape.width or 0)
+    box_h = int(shape.height or 0)
+    if box_w <= 0 or box_h <= 0:
+        return
+    start = int(_slot_font_pt({"shape": shape, "height": box_h}) or 40)
+    cover_well = box_h >= int(2.0 * EMU_INCH)
+    size = reduce_title_size(
+        text,
+        box_w,
+        box_h,
+        start,
+        max_lines=2 if cover_well else None,
+        fit_height=cover_well,
+    )
+    _apply_font_size(shape, size)
+    # One-word covers must never wrap the last letter onto its own line.
+    if len((text or "").split()) == 1:
+        try:
+            shape.text_frame.word_wrap = False
+        except Exception:
+            pass
+
+
 def clear_shape_text(shape) -> None:
     replace_shape_text(shape, "")
 
@@ -1314,6 +1354,8 @@ def fill_text_slots(slide, title: str, subtitle: str, body_paras: list[str]) -> 
         if not title:
             delete_shape(title_slot["shape"])
             title_slot = None
+        else:
+            fit_title_in_slot(title_slot["shape"], title)
     body_texts: list[str] = [
         p
         for p in body_paras
@@ -1870,11 +1912,63 @@ def collapse_overlapping_text(slide) -> None:
             deleted.add(id(drop))
 
 
+COVER_CONTAIN_MAX_LEFTOVER = 0.28
+
+
+def _is_cover_photo_slide(role: str | None, frames: list[dict[str, Any]]) -> bool:
+    """Only the Presentation Title slide uses the keep-or-contain collage rule."""
+    return role == "TITLE" and bool(frames)
+
+
+def _place_cover_photos(
+    slide,
+    sources: list[dict[str, Any]],
+    frames: list[dict[str, Any]],
+    tokens: dict[str, Any],
+    flags: list[str],
+) -> None:
+    """Contain-fit one photo in the hero well, or keep the official title collage.
+
+    A cover mosaic (several tiles, or one image that would letterbox) looks worse
+    than the template aerial/collage — keep that stock (PR #9) and never overflow
+    a second collage onto the cream title panel.
+    """
+    if not frames:
+        return
+    slide_w = int(tokens["slide_width"])
+    slide_h = int(tokens["slide_height"])
+    hero = max(frames, key=lambda item: int(item.get("area") or 0))
+    box = clamp_box_to_slide(
+        {"left": hero["left"], "top": hero["top"], "width": hero["width"], "height": hero["height"]},
+        slide_w,
+        slide_h,
+    )
+    loaded_sources: list[tuple[dict[str, Any], bytes, int, int]] = []
+    for placement in sources:
+        loaded = _load_picture_blob(placement)
+        if loaded is None:
+            continue
+        blob, img_w, img_h = loaded
+        if not img_w or not img_h:
+            continue
+        loaded_sources.append((placement, blob, int(img_w), int(img_h)))
+    if len(loaded_sources) != 1:
+        return
+    _placement, blob, img_w, img_h = loaded_sources[0]
+    leftover = contain_leftover_fraction(img_w, img_h, box)
+    if leftover > COVER_CONTAIN_MAX_LEFTOVER:
+        flags.append("COVER_KEPT_TEMPLATE")
+        return
+    delete_shape(hero["shape"])
+    add_unlocked_picture(slide, blob, box, img_w, img_h, fill_well=False)
+
+
 def place_source_photos(
     slide,
     placements: list[dict[str, Any]],
     tokens: dict[str, Any],
     flags: list[str],
+    role: str | None = None,
 ) -> None:
     """Swap a well only when a real source photograph maps into it; keep unused stock art."""
     sources: list[dict[str, Any]] = []
@@ -1887,6 +1981,9 @@ def place_source_photos(
     slide_w = int(tokens["slide_width"])
     slide_h = int(tokens["slide_height"])
     frames = content_photo_frames(slide, slide_w, slide_h)
+    if _is_cover_photo_slide(role, frames):
+        _place_cover_photos(slide, sources, frames, tokens, flags)
+        return
     used_ids: set[int] = set()
     for placement in sources:
         loaded = _load_picture_blob(placement)

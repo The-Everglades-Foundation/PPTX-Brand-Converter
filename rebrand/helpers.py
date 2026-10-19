@@ -196,12 +196,59 @@ def delete_all_slides(prs) -> None:
         sld_id_lst.remove(sld_id)
 
 
+def char_width_factor(text: str) -> float:
+    """ALL-CAPS display titles are wider than the 0.5 em body estimate."""
+    letters = [ch for ch in (text or "") if ch.isalpha()]
+    if letters and sum(1 for ch in letters if ch.isupper()) / len(letters) >= 0.7:
+        return 0.72
+    return 0.5
+
+
+def chars_per_line(font_pt: float, box_width_emu: int, avg_char_w: float = 0.5) -> int:
+    font_pt = max(1.0, float(font_pt or 1))
+    avg_char_w = max(0.35, float(avg_char_w or 0.5))
+    return max(1, int((box_width_emu / EMU_PER_PT) / (font_pt * avg_char_w)))
+
+
+def words_fit_line(text: str, font_pt: float, box_width_emu: int, avg_char_w: float | None = None) -> bool:
+    """False when a word is wider than the well (FOREVERGLADE / S orphan wrap)."""
+    factor = char_width_factor(text) if avg_char_w is None else avg_char_w
+    limit = chars_per_line(font_pt, box_width_emu, factor)
+    words = re.findall(r"\S+", text or "")
+    return all(len(word) <= limit for word in words)
+
+
 def estimate_lines(text: str, font_pt: float, box_width_emu: int, avg_char_w: float = 0.5) -> int:
-    chars_per_line = max(1, int((box_width_emu / EMU_PER_PT) / (font_pt * avg_char_w)))
-    return sum(max(1, -(-len(p) // chars_per_line)) for p in (text or "").split("\n"))
+    """Word-aware line count. A word longer than the line wraps mid-word (orphans)."""
+    limit = chars_per_line(font_pt, box_width_emu, avg_char_w)
+    total = 0
+    for para in (text or "").split("\n"):
+        words = re.findall(r"\S+", para)
+        if not words:
+            total += 1
+            continue
+        used = 0
+        lines = 1
+        for word in words:
+            if len(word) > limit:
+                extra = -(-len(word) // limit)
+                if used:
+                    lines += extra
+                    used = 0
+                else:
+                    lines += extra - 1
+            elif used == 0:
+                used = len(word)
+            elif used + 1 + len(word) <= limit:
+                used += 1 + len(word)
+            else:
+                lines += 1
+                used = len(word)
+        total += lines
+    return total
 
 
-def fits(paragraphs: Iterable[Any], font_pt: float, box_w: int, box_h: int, line_spacing: float = 1.2) -> bool:
+def fits(paragraphs: Iterable[Any], font_pt: float, box_w: int, box_h: int, line_spacing: float = 1.2, avg_char_w: float | None = None) -> bool:
     texts: list[str] = []
     for item in paragraphs:
         if isinstance(item, str):
@@ -210,7 +257,11 @@ def fits(paragraphs: Iterable[Any], font_pt: float, box_w: int, box_h: int, line
             texts.append(item.get("text") or "")
         else:
             texts.append(getattr(item, "text", "") or "")
-    lines = sum(estimate_lines(text, font_pt, box_w) for text in texts) or 1
+    lines = 0
+    for text in texts:
+        factor = avg_char_w if avg_char_w is not None else 0.5
+        lines += estimate_lines(text, font_pt, box_w, factor)
+    lines = lines or 1
     return lines * font_pt * line_spacing * EMU_PER_PT <= box_h
 
 
@@ -409,11 +460,38 @@ def reduce_body_size(paragraphs: list[dict[str, Any]], box_w: int, box_h: int) -
     return 12
 
 
-def reduce_title_size(text: str, box_w: int, box_h: int, start: int) -> int:
+def reduce_title_size(
+    text: str,
+    box_w: int,
+    box_h: int,
+    start: int,
+    max_lines: int | None = None,
+    fit_height: bool = True,
+) -> int:
+    """Shrink until words stay intact (no orphan letter) and the title fits the well."""
     size = start
-    while size > 24 and not fits([text], size, box_w, box_h, line_spacing=1.1):
-        size -= 2
+    factor = char_width_factor(text)
+    while size > 24:
+        if not words_fit_line(text, size, box_w, factor):
+            size -= 2
+            continue
+        lines = estimate_lines(text, size, box_w, factor)
+        if max_lines is not None and lines > max_lines:
+            size -= 2
+            continue
+        if fit_height and not fits([text], size, box_w, box_h, line_spacing=1.1, avg_char_w=factor):
+            size -= 2
+            continue
+        return size
     return max(24, size)
+
+
+def contain_leftover_fraction(img_w: int, img_h: int, box: dict[str, int]) -> float:
+    """How much of the well would stay empty after a contain-fit (0 = flush)."""
+    fit = contain_fit(img_w, img_h, box)
+    well = max(1, int(box.get("width") or 0) * int(box.get("height") or 0))
+    used = max(1, int(fit["width"]) * int(fit["height"]))
+    return max(0.0, 1.0 - used / well)
 
 
 def normalize_alignment(value: Any) -> str:
