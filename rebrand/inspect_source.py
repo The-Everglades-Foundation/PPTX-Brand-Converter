@@ -29,6 +29,7 @@ from helpers import (  # noqa: E402
     is_edge_logo,
     is_footer_shape,
     is_line_or_arrow,
+    is_layout_label,
     is_org_chrome,
     is_title_like,
     iter_shapes_abs,
@@ -259,7 +260,7 @@ def _is_org_chrome(text: str) -> bool:
 
 def _title_ready(shape: dict[str, Any]) -> str:
     text = (shape.get("text") or "").strip()
-    if not text or shape.get("drop_footer") or _is_org_chrome(text):
+    if not text or shape.get("drop_footer") or _is_org_chrome(text) or is_layout_label(text):
         return ""
     return text
 
@@ -360,7 +361,7 @@ def inspect_source(source_path: Path, out_dir: Path) -> dict[str, Any]:
         for shape, left, top in iter_shapes_abs(slide.shapes):
             rec = inspect_shape(shape, left, top, slide_w, slide_h, media_dir, index, pic_n)
             rec["drop_icon"] = rec.get("kind") == "picture" and is_decorative_icon(rec)
-            if _is_org_chrome(rec.get("text") or ""):
+            if _is_org_chrome(rec.get("text") or "") or is_layout_label(rec.get("text") or ""):
                 rec["drop_footer"] = True
             if rec.get("kind") == "picture":
                 pic_n += 1

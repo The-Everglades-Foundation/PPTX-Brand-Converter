@@ -26,11 +26,14 @@ from helpers import (
     A_NS,
     P_NS,
     R_NS,
+    apply_picture_crop,
     blob_hash,
     classify_layout_role,
     clamp_box_to_slide,
     contain_fit,
     content_safe_box,
+    cover_crop,
+    is_banner_photo_well,
     delete_shape,
     enum_name,
     estimate_lines,
@@ -1438,8 +1441,24 @@ def bring_picture_to_front(shape) -> None:
     parent.append(el)
 
 
-def add_unlocked_picture(slide, blob: bytes, box: dict[str, int], img_w: int | None, img_h: int | None):
-    if img_w and img_h:
+def add_unlocked_picture(
+    slide,
+    blob: bytes,
+    box: dict[str, int],
+    img_w: int | None,
+    img_h: int | None,
+    fill_well: bool = False,
+):
+    crop = None
+    if img_w and img_h and fill_well:
+        fit = {
+            "left": int(box["left"]),
+            "top": int(box["top"]),
+            "width": int(box["width"]),
+            "height": int(box["height"]),
+        }
+        crop = cover_crop(int(img_w), int(img_h), fit)
+    elif img_w and img_h:
         fit = contain_fit(int(img_w), int(img_h), box)
     else:
         fit = box
@@ -1451,6 +1470,8 @@ def add_unlocked_picture(slide, blob: bytes, box: dict[str, int], img_w: int | N
         int(fit["height"]),
     )
     sanitize_new_picture(picture)
+    if crop and any(crop.values()):
+        apply_picture_crop(picture, crop)
     bring_picture_to_front(picture)
     return picture
 
@@ -1882,7 +1903,14 @@ def place_source_photos(
             )
             delete_shape(frame["shape"])
             used_ids.add(id(frame["shape"]))
-            add_unlocked_picture(slide, blob, box, img_w, img_h)
+            add_unlocked_picture(
+                slide,
+                blob,
+                box,
+                img_w,
+                img_h,
+                fill_well=not is_banner_photo_well(box, slide_w, slide_h),
+            )
             continue
         add_unlocked_picture(slide, blob, _free_photo_box(slide, tokens, img_w, img_h), img_w, img_h)
         flags.append("PICTURE_OVERFLOW")

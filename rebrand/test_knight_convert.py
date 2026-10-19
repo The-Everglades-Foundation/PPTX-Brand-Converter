@@ -34,6 +34,9 @@ from colorways import is_layout_chrome  # noqa: E402
 
 EMU = 914400
 FIXTURE = REPO / "fixtures" / "knight_foreverglades.pptx"
+USER_CONVERT = Path(
+    "/cursor/stores/bc-d2ce698c-eb2f-4f8d-a4a5-1d14dc2ece8e/media/knight-converted-green.pptx"
+)
 
 
 def _jpeg(color: tuple[int, int, int], size: tuple[int, int] = (640, 420)) -> bytes:
@@ -162,6 +165,87 @@ def _slide_blob(slide) -> str:
     return "\n".join(_iter_text(slide))
 
 
+def _assert_intro_not_caption(test, slide, prs) -> None:
+    blob = _slide_blob(slide)
+    _assert_no_dummy(slide, "intro")
+    test.assertNotIn("CAPTION", blob)
+    titles = [
+        s
+        for s in slide.shapes
+        if getattr(s, "has_text_frame", False)
+        and (s.text_frame.text or "").strip() == "INTRODUCING FOREVERGLADES"
+    ]
+    test.assertTrue(titles, "INTRODUCING FOREVERGLADES must be its own title well")
+    test.assertGreater(int(titles[0].width or 0), int(6.0 * EMU), "title must use a title well, not a caption strip")
+    test.assertLess(int(titles[0].top or 0), int(6.0 * EMU), "title must not sit in the bottom caption strip")
+    pics = [s for s in slide.shapes if s.shape_type in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}]
+    test.assertTrue(pics, "intro must keep the source photo")
+    pic = max(pics, key=lambda s: int(s.width or 0) * int(s.height or 0))
+    slide_w = int(prs.slide_width)
+    slide_h = int(prs.slide_height)
+    letterbox = (
+        int(pic.top or 0) <= int(0.05 * EMU)
+        and int(pic.height or 0) >= slide_h - int(0.1 * EMU)
+        and int(pic.left or 0) > int(0.5 * EMU)
+        and int(pic.left or 0) + int(pic.width or 0) < slide_w - int(0.5 * EMU)
+    )
+    test.assertFalse(letterbox, "intro photo must not be letterboxed with side bars on a full-bleed caption")
+    test.assertGreater(int(pic.left or 0), int(slide_w * 0.35), "intro photo should fill the right image well")
+    well_area = max(1, int(pic.width or 0) * int(pic.height or 0))
+    test.assertGreater(well_area, int(8.0 * EMU) * int(5.0 * EMU), "intro photo well must be filled, not a tiny thumb")
+
+
+def _assert_partner_title_and_cards(test, slide) -> None:
+    blob = _slide_blob(slide)
+    _assert_no_dummy(slide, "partner")
+    test.assertIn("TWO POINTS", blob)
+    test.assertIn("Flexible giving", blob)
+    titles = [
+        s
+        for s in slide.shapes
+        if getattr(s, "has_text_frame", False)
+        and (s.text_frame.text or "").strip() == "WAYS TO PARTNER"
+    ]
+    test.assertTrue(titles, "WAYS TO PARTNER must occupy its own title well")
+    test.assertGreater(int(titles[0].width or 0), int(8.0 * EMU))
+    test.assertNotIn("$350,000", titles[0].text_frame.text)
+    money = [
+        s
+        for s in slide.shapes
+        if getattr(s, "has_text_frame", False)
+        and "$350,000" in (s.text_frame.text or "")
+        and "WAYS TO PARTNER" not in (s.text_frame.text or "")
+    ]
+    test.assertTrue(money, "$350,000 callout stays in the body, not as the slide title")
+    badges = [
+        s
+        for s in slide.shapes
+        if getattr(s, "has_text_frame", False) and (s.text_frame.text or "").strip() in {"01", "02"}
+    ]
+    test.assertEqual(len(badges), 2)
+    title_bottom = int(titles[0].top or 0) + int(titles[0].height or 0)
+    for badge in badges:
+        test.assertGreaterEqual(
+            int(badge.top or 0),
+            title_bottom - int(0.08 * EMU),
+            "01/02 badges must not cover the title",
+        )
+    content = [
+        s
+        for s in slide.shapes
+        if getattr(s, "has_text_frame", False)
+        and (s.text_frame.text or "").strip()
+        and not is_layout_chrome((s.text_frame.text or "").strip())
+    ]
+    for i, a in enumerate(content):
+        for b in content[i + 1 :]:
+            test.assertLess(
+                max(_overlap(a, b), _overlap(b, a)),
+                0.12,
+                f"partner frames overlap {a.text_frame.text[:40]!r} vs {b.text_frame.text[:40]!r}",
+            )
+
+
 def _overlap(a, b) -> float:
     aw, ah = max(1, int(a.width or 0)), max(1, int(a.height or 0))
     left = max(int(a.left or 0), int(b.left or 0))
@@ -188,6 +272,8 @@ class HelperTests(unittest.TestCase):
     def test_title_like_vs_caption_and_money(self):
         self.assertTrue(is_title_like("INTRODUCING FOREVERGLADES"))
         self.assertTrue(is_title_like("WAYS TO PARTNER"))
+        self.assertFalse(is_title_like("CAPTION"))
+        self.assertFalse(is_title_like("TWO POINTS"))
         self.assertFalse(
             is_title_like(
                 '$350,000: on-screen credit as "Major Production Funding Provided By...", '
@@ -277,17 +363,7 @@ class KnightForevergladesConvertTests(unittest.TestCase):
         name = (entry.get("template_layout_name") or "").lower()
         self.assertNotIn("caption", name)
         slide = self._by_title("INTRODUCING FOREVERGLADES")
-        blob = _slide_blob(slide)
-        _assert_no_dummy(slide, "intro")
-        self.assertNotIn("CAPTION", blob)
-        titles = [
-            s
-            for s in slide.shapes
-            if getattr(s, "has_text_frame", False)
-            and "INTRODUCING FOREVERGLADES" in (s.text_frame.text or "")
-        ]
-        self.assertTrue(titles)
-        self.assertGreater(int(titles[0].width or 0), int(6.0 * EMU), "title must use a title well, not a caption strip")
+        _assert_intro_not_caption(self, slide, self.prs)
 
     def test_metric_number_stays_with_its_label(self):
         slide = self._by_title("1 MILLION")
@@ -313,25 +389,7 @@ class KnightForevergladesConvertTests(unittest.TestCase):
 
     def test_ways_to_partner_is_the_title(self):
         slide = self._by_title("WAYS TO PARTNER")
-        blob = _slide_blob(slide)
-        _assert_no_dummy(slide, "partner")
-        self.assertIn("Major Production Funding", blob)
-        titles = [
-            s
-            for s in slide.shapes
-            if getattr(s, "has_text_frame", False)
-            and (s.text_frame.text or "").strip() == "WAYS TO PARTNER"
-        ]
-        self.assertTrue(titles, "WAYS TO PARTNER must occupy its own title well")
-        self.assertGreater(int(titles[0].width or 0), int(8.0 * EMU))
-        money = [
-            s
-            for s in slide.shapes
-            if getattr(s, "has_text_frame", False)
-            and "$350,000" in (s.text_frame.text or "")
-            and "WAYS TO PARTNER" not in (s.text_frame.text or "")
-        ]
-        self.assertTrue(money, "$350,000 callout stays in the body, not as the slide title")
+        _assert_partner_title_and_cards(self, slide)
 
     def test_digital_groundwork_uses_three_parts(self):
         slide = self._by_title("DIGITAL GROUNDWORK")
@@ -386,6 +444,45 @@ class KnightForevergladesConvertTests(unittest.TestCase):
                         0.12,
                         f"slide {i + 1} overlapping copy {a.text_frame.text[:40]!r} vs {b.text_frame.text[:40]!r}",
                     )
+
+
+@unittest.skipUnless(TEMPLATE.exists() and USER_CONVERT.exists(), "user Knight green convert not in this environment")
+class UserKnightConvertAsSourceTests(unittest.TestCase):
+    """Reconvert the staff green file so Caption-for-intro / $350k-as-title cannot return."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.result = _convert(TEMPLATE, USER_CONVERT, Path(cls.tmp.name) / "built")
+        cls.prs = Presentation(str(cls.result["output"]))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_user_intro_is_not_caption(self):
+        slide = next(
+            s
+            for s in self.prs.slides
+            if "INTRODUCING FOREVERGLADES" in _slide_blob(s)
+        )
+        _assert_intro_not_caption(self, slide, self.prs)
+        entry = next(
+            e
+            for e in self.result["plan"]["entries"]
+            if "INTRODUCING FOREVERGLADES"
+            in " ".join(
+                str(p.get("text") or "")
+                + " "
+                + " ".join((para.get("text") or "") for para in (p.get("paragraphs") or []))
+                for p in e.get("placements") or []
+            )
+        )
+        self.assertNotIn("caption", (entry.get("template_layout_name") or "").lower())
+
+    def test_user_partner_title_is_ways_to_partner(self):
+        slide = next(s for s in self.prs.slides if "Flexible giving" in _slide_blob(s))
+        _assert_partner_title_and_cards(self, slide)
 
 
 @unittest.skipUnless(TEMPLATE.exists() and KNIGHT.exists(), "Knight store fixture missing")

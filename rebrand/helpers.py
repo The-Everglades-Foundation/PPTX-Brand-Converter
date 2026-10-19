@@ -820,6 +820,30 @@ def contain_fit(img_w: int, img_h: int, box: dict[str, int]) -> dict[str, int]:
     return {"left": left, "top": top, "width": width, "height": height}
 
 
+def cover_crop(img_w: int, img_h: int, box: dict[str, int]) -> dict[str, int]:
+    """srcRect crop (100000 = 100%) that fills the well without letterbox bars."""
+    img_w = max(1, img_w)
+    img_h = max(1, img_h)
+    box_w = max(1, int(box["width"]))
+    box_h = max(1, int(box["height"]))
+    scale = max(box_w / img_w, box_h / img_h)
+    drawn_w = img_w * scale
+    drawn_h = img_h * scale
+    extra_w = max(0.0, drawn_w - box_w)
+    extra_h = max(0.0, drawn_h - box_h)
+    return {
+        "left": int(round((extra_w / 2) / drawn_w * 100000)),
+        "right": int(round((extra_w / 2) / drawn_w * 100000)),
+        "top": int(round((extra_h / 2) / drawn_h * 100000)),
+        "bottom": int(round((extra_h / 2) / drawn_h * 100000)),
+    }
+
+
+def is_banner_photo_well(box: dict[str, int], slide_w: int, slide_h: int) -> bool:
+    """Wide short strip (Two Points banner) — keep contain-fit, do not cover-crop."""
+    return int(box.get("width") or 0) >= int(slide_w * 0.55) and int(box.get("height") or 0) <= int(slide_h * 0.38)
+
+
 def blob_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -878,6 +902,31 @@ def crop_cut_fraction(crop: dict[str, int]) -> float:
     bottom = (crop.get("bottom") or 0) / 100000
     remain = max(0.0, 1 - left - right) * max(0.0, 1 - top - bottom)
     return max(0.0, 1 - remain)
+
+
+LAYOUT_CHROME_LABELS = {
+    "PRESENTATION TITLE",
+    "CONTENTS",
+    "THE POINT",
+    "BY THE NUMBERS",
+    "KICKER",
+    "THREE PARTS",
+    "TWO POINTS",
+    "COMPARISON",
+    "SEQUENCE",
+    "PEOPLE",
+    "NOTES FOR STAFF",
+    "BRAND PALETTE",
+    "CAPTION",
+}
+
+
+def is_layout_label(text: str) -> bool:
+    """True for template kicker words (CAPTION, TWO POINTS) — never a source title."""
+    t = compact_text(text)
+    if t.upper() in LAYOUT_CHROME_LABELS:
+        return True
+    return bool(re.fullmatch(r"0\d", t))
 
 
 ORG_CHROME_RE = re.compile(
@@ -969,7 +1018,7 @@ def is_all_caps_heading(text: str, max_words: int = 8) -> bool:
 def is_title_like(text: str) -> bool:
     """Slide titles (ALL-CAPS or short labels), not money sentences or captions."""
     t = compact_text(text)
-    if not t or is_org_chrome(t):
+    if not t or is_org_chrome(t) or is_layout_label(t):
         return False
     words = t.split()
     if len(words) > 12:
@@ -1019,8 +1068,8 @@ def title_candidate_score(text: str) -> int:
         score -= 40
     if t.endswith((".", "!", "?")) or (":" in t and n >= 6):
         score -= 16
-    if is_org_chrome(t):
-        score -= 40
+    if is_org_chrome(t) or is_layout_label(t):
+        score -= 80
     return score
 
 
