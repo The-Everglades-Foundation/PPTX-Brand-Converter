@@ -29,6 +29,7 @@ Place Communications’ official 2023 template at `templates/everglades.pptx`. I
 | `npm install`      | Install dependencies |
 | `npm run dev`      | Dev server at `localhost:4321` |
 | `npm run build`    | Production build to `./dist/` |
+| `npm run start`    | Run the production Node server (`HOST` / `PORT`) |
 | `npm run preview`  | Preview the production build locally |
 | `npm run template` | Rebuild a python-pptx starter deck (dev only; does not replace the official Communications file) |
 | `npm run fixture`  | Rebuild `fixtures/sample.pptx` |
@@ -56,6 +57,41 @@ src/pages/index.astro    Staff upload UI
 src/pages/api/           parse + convert (plan.json + QA flags)
 src/layouts/Layout.astro
 src/styles/global.css    Everglades color tokens
+```
+
+## Production (Node + Python)
+
+Convert **spawns** `converter/.venv` and `rebrand/api.py` (`python-pptx`). That is a long-running Node process plus a Python interpreter. It will not run on **Cloudflare Workers** or **Workers Builds** (the `pptx-brand-converter` Worker check that fails with a missing entry point is the wrong host — ignore it).
+
+Smallest reliable ship path is **Docker**:
+
+```sh
+docker build -t pptx-brand-converter .
+docker run --rm -p 8080:8080 -e INTERNAL_PASSWORD pptx-brand-converter
+```
+
+Or `docker compose up --build` if the Compose plugin is installed. Then open `http://127.0.0.1:8080`. `GET /health` should return `{"ok":true,"python":true,"template":true}`.
+
+Set `INTERNAL_PASSWORD` in the environment (or a `.env` next to `docker-compose.yml`) before exposing the service.
+
+### Host it on Render
+
+1. Open [Render Blueprints](https://dashboard.render.com/blueprints) and sign in (or create a Render account).
+2. **New Blueprint** → connect `evergladesfoundation/PPTX-Brand-Converter`.
+3. Apply `render.yaml`. Use at least the **Standard** plan (512 MB is tight for 50 MB decks).
+4. In the service **Environment**, set `INTERNAL_PASSWORD`.
+5. Wait for the deploy, then open the `*.onrender.com` URL and sign in.
+
+Any other Docker host (Fly.io, a VM, Kubernetes) works the same: build this `Dockerfile`, publish port `8080`, set `HOST=0.0.0.0` and `INTERNAL_PASSWORD`.
+
+Bare metal without Docker:
+
+```sh
+python3 -m venv converter/.venv
+converter/.venv/bin/python -m pip install -r converter/requirements.txt
+npm ci
+npm run build
+HOST=0.0.0.0 PORT=8080 NODE_ENV=production npm start
 ```
 
 ## Tailwind notes

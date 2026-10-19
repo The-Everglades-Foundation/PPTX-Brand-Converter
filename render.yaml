@@ -1,0 +1,15 @@
+# Blueprint: https://dashboard.render.com/blueprints
+# Connect this repo, apply the blueprint, then set INTERNAL_PASSWORD in the dashboard.
+services:
+  - type: web
+    name: pptx-brand-converter
+    runtime: docker
+    plan: standard
+    healthCheckPath: /health
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: NODE_ENV
+        value: production
+      - key: INTERNAL_PASSWORD
+        sync: false
