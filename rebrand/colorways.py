@@ -1249,9 +1249,16 @@ def _free_photo_box(slide, tokens: dict[str, Any], img_w: int | None, img_h: int
             "height": int(safe["height"] * 0.80),
         },
     ]
+    pics = [
+        _shape_box(shape)
+        for shape in slide.shapes
+        if shape.shape_type in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}
+    ]
     for cand in candidates:
         box = clamp_box_to_slide(cand, slide_w, slide_h)
-        if all(overlap_fraction(box, text) < 0.20 for text in texts):
+        if all(overlap_fraction(box, text) < 0.20 for text in texts) and all(
+            overlap_fraction(box, pic) < 0.20 for pic in pics
+        ):
             return box
     # Last resort: modest lower-right card, not the full content-safe area.
     return clamp_box_to_slide(
@@ -1264,22 +1271,6 @@ def _free_photo_box(slide, tokens: dict[str, Any], img_w: int | None, img_h: int
         slide_w,
         slide_h,
     )
-
-
-def purge_sample_photos(slide, tokens: dict[str, Any]) -> None:
-    """Drop leftover template sample photographs (never the brand lockup)."""
-    sample = set(tokens.get("sample_photo_hashes") or [])
-    logos = set(tokens.get("logo_hashes") or [])
-    if not sample and not logos:
-        return
-    for shape in list(slide.shapes):
-        if shape.shape_type not in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}:
-            continue
-        digest = _picture_hash(shape)
-        if digest and digest in logos:
-            continue
-        if digest and digest in sample:
-            delete_shape(shape)
 
 
 def _placement_is_icon(placement: dict[str, Any], tokens: dict[str, Any] | None = None) -> bool:
@@ -1521,7 +1512,7 @@ def place_source_photos(
     tokens: dict[str, Any],
     flags: list[str],
 ) -> None:
-    """Delete template content frames and add_picture new unlocked pics at that geometry."""
+    """Swap a well only when a real source photograph maps into it; keep unused stock art."""
     sources: list[dict[str, Any]] = []
     for placement in placements:
         if _load_picture_blob(placement) is None:
@@ -1552,15 +1543,6 @@ def place_source_photos(
             continue
         add_unlocked_picture(slide, blob, _free_photo_box(slide, tokens, img_w, img_h), img_w, img_h)
         flags.append("PICTURE_OVERFLOW")
-    # Always drop leftover sample art, including slides with no source photos.
-    for frame in frames:
-        if id(frame["shape"]) in used_ids:
-            continue
-        try:
-            delete_shape(frame["shape"])
-        except Exception:
-            continue
-    purge_sample_photos(slide, tokens)
 
 
 def replace_largest_picture(slide, image_path: str, slide_w: int, slide_h: int) -> bool:
@@ -1581,6 +1563,4 @@ def replace_largest_picture(slide, image_path: str, slide_w: int, slide_h: int) 
     box = {"left": frame["left"], "top": frame["top"], "width": frame["width"], "height": frame["height"]}
     delete_shape(frame["shape"])
     add_unlocked_picture(slide, blob, box, img_w, img_h)
-    for extra in frames[1:]:
-        delete_shape(extra["shape"])
     return True
