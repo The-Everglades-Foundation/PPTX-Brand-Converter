@@ -51,7 +51,9 @@ export function pythonExecutable(): string {
   const unix = join(ROOT, "converter", ".venv", "bin", "python");
   if (existsSync(windows)) return windows;
   if (existsSync(unix)) return unix;
-  return process.platform === "win32" ? "python" : "python3";
+  throw new Error(
+    "Python converter is not installed. From the repo root run: python3 -m venv converter/.venv && converter/.venv/bin/python -m pip install -r converter/requirements.txt",
+  );
 }
 
 function runPython(args: string[], timeoutMs: number): Promise<string> {
@@ -59,6 +61,7 @@ function runPython(args: string[], timeoutMs: number): Promise<string> {
     const child = spawn(pythonExecutable(), args, {
       cwd: ROOT,
       windowsHide: true,
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
     });
     let stdout = "";
     let stderr = "";

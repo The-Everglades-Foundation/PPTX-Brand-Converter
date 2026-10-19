@@ -300,6 +300,18 @@ const { authed, authRequired } = Astro.props;
     app?.classList.remove("hidden");
   });
 
+  async function readPayload<T extends { error?: string }>(response: Response): Promise<T> {
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      const clipped = text.replace(/\s+/g, " ").trim().slice(0, 280);
+      throw new Error(
+        clipped || `Could not read this deck (HTTP ${response.status}).`,
+      );
+    }
+  }
+
   async function parseFile(file: File) {
     clearError();
     qaBox?.classList.add("hidden");
@@ -316,38 +328,48 @@ const { authed, authRequired } = Astro.props;
           : `${kb} KB`;
       fileLabel.textContent = `${file.name} · ${size}`;
     }
-    setStatus("Inspecting slides and template…");
+    setStatus("Reading slides…");
     preview?.classList.add("hidden");
     const body = new FormData();
     body.set("file", file);
     body.set("colorway", selectedColorway());
-    const response = await fetch("/api/parse", { method: "POST", body });
-    const payload = (await response.json()) as ParsePayload;
-    if (!response.ok) {
-      setStatus(null);
-      showError(payload.error || "Could not read this deck.");
-      return;
-    }
-    roleOptions = payload.roles;
-    layoutMap = payload.layoutMap || {};
-    layoutNames = payload.layoutNames || {};
-    chosen = payload.slides.map((slide) => slide.role);
-    renderSlides(payload.slides);
-    renderColorways(payload.colorways, payload.selectedColorway);
-    if (templateNoteEl) {
-      const note = payload.templateNotes?.find((item) => !/stand-in|generated starter/i.test(item));
-      if (note) {
-        templateNoteEl.textContent = note;
-        templateNoteEl.classList.remove("hidden");
-      } else {
-        templateNoteEl.classList.add("hidden");
+    try {
+      const response = await fetch("/api/parse", { method: "POST", body });
+      const payload = await readPayload<ParsePayload>(response);
+      if (!response.ok) {
+        setStatus(null);
+        showError(payload.error || "Could not read this deck.");
+        return;
       }
+      if (!payload.slides?.length) {
+        setStatus(null);
+        showError("No slides came back from this deck.");
+        return;
+      }
+      roleOptions = payload.roles || [];
+      layoutMap = payload.layoutMap || {};
+      layoutNames = payload.layoutNames || {};
+      chosen = payload.slides.map((slide) => slide.role);
+      renderSlides(payload.slides);
+      renderColorways(payload.colorways, payload.selectedColorway);
+      if (templateNoteEl) {
+        const note = payload.templateNotes?.find((item) => !/stand-in|generated starter/i.test(item));
+        if (note) {
+          templateNoteEl.textContent = note;
+          templateNoteEl.classList.remove("hidden");
+        } else {
+          templateNoteEl.classList.add("hidden");
+        }
+      }
+      const design = selectedColorway();
+      setStatus(
+        `${payload.slideCount} slides planned · ${design === "blue" ? "Blue (Water Teal)" : "Green (Sawgrass Lime)"}. Adjust roles if needed, then download.`,
+      );
+      preview?.classList.remove("hidden");
+    } catch (error) {
+      setStatus(null);
+      showError(error instanceof Error ? error.message : "Could not read this deck.");
     }
-    const design = selectedColorway();
-    setStatus(
-      `${payload.slideCount} slides planned · ${design === "blue" ? "Blue (Water Teal)" : "Green (Sawgrass Lime)"}. Adjust roles if needed, then download.`,
-    );
-    preview?.classList.remove("hidden");
   }
 
   function renderSlides(slides: SlidePreview[]) {
@@ -378,7 +400,7 @@ const { authed, authRequired } = Astro.props;
           <p class="font-extrabold uppercase">${escapeHtml(slide.title || slide.bodyPreview.split("\n")[0] || "Untitled")}</p>
           <p class="text-ink-muted line-clamp-4 text-sm">${escapeHtml(slide.bodyPreview || "")}</p>
           ${badges ? `<p class="text-sm font-bold">${escapeHtml(badges)}</p>` : ""}
-          ${slide.warnings.length ? `<p class="text-sm text-red-700">${escapeHtml(slide.warnings.join(" "))}</p>` : ""}
+          ${slide.warnings?.length ? `<p class="text-sm text-red-700">${escapeHtml(slide.warnings.join(" "))}</p>` : ""}
           <label class="block text-sm">
             <span class="font-bold">Layout role</span>
             <select data-index="${index}" class="border-line mt-2 h-11 w-full rounded-sm border bg-transparent px-3">${select}</select>

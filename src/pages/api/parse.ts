@@ -32,7 +32,9 @@ export const POST: APIRoute = async ({ request }) => {
       headers: { "Content-Type": "application/json" },
     });
   } catch (error) {
-    return jsonError(asError(error), 500);
+    const message = asError(error);
+    const status = /not installed|Missing templates/i.test(message) ? 503 : 500;
+    return jsonError(message, status);
   }
 };
 
