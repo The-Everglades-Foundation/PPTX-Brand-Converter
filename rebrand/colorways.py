@@ -42,6 +42,7 @@ from helpers import (
     iter_shapes_abs,
     maybe_recompress,
     overlap_fraction,
+    pair_metric_label_items,
     placeholder_type,
     resolve_layout_map,
     rgb,
@@ -958,6 +959,9 @@ def _distribute_groups(groups: list[list[str]], n: int) -> list[list[str]]:
 def _split_into(items: list[str], n: int) -> list[list[str]]:
     if n <= 1:
         return [items]
+    metric_groups = pair_metric_label_items(items)
+    if metric_groups:
+        return _distribute_groups(metric_groups, n)
     starts = _heading_group_starts(items)
     if len(starts) >= 2:
         groups = []

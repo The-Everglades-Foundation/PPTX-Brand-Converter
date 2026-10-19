@@ -18,10 +18,14 @@ from helpers import (  # noqa: E402
     data_content_box,
     dump_json,
     fits,
+    is_all_caps_heading,
     is_decorative_icon,
+    is_metric_label,
+    is_metric_line,
     is_org_chrome,
     layout_index_for_role,
     load_json,
+    looks_like_metric_pairs,
     reduce_body_size,
     reduce_title_size,
 )
@@ -638,6 +642,7 @@ def _content_slot_count(slide: dict[str, Any] | None) -> int:
     title = title_shape(slide)
     title_id = title.get("id") if title else None
     title_text = (slide.get("title_text") or "").strip()
+    subtitle_text = (slide.get("subtitle_text") or "").strip()
     blocks: list[dict[str, Any]] = []
     for shape in content_shapes(slide):
         if shape.get("id") == title_id:
@@ -645,7 +650,7 @@ def _content_slot_count(slide: dict[str, Any] | None) -> int:
         if shape.get("kind") != "text":
             continue
         text = (shape.get("text") or "").strip()
-        if not text or text == title_text:
+        if not text or text == title_text or text == subtitle_text:
             continue
         ph = (shape.get("placeholder_type") or "").upper()
         if ph in {"TITLE", "CENTER_TITLE", "VERTICAL_TITLE", "SUBTITLE"}:
@@ -656,7 +661,14 @@ def _content_slot_count(slide: dict[str, Any] | None) -> int:
     n_caps = 0
     n_stmt = 0
     n_kpi = 0
-    for shape in blocks:
+    kpi_texts: list[str] = []
+    for shape in sorted(
+        blocks,
+        key=lambda s: (
+            int((s.get("bounds") or {}).get("top") or 0),
+            int((s.get("bounds") or {}).get("left") or 0),
+        ),
+    ):
         if _is_full_width_block(shape, blocks):
             continue
         text = (shape.get("text") or "").strip()
@@ -668,7 +680,14 @@ def _content_slot_count(slide: dict[str, Any] | None) -> int:
             n_stmt += 1
         elif len(words) <= 8:
             n_kpi += 1
+            kpi_texts.append(text)
     cols = _text_column_count(slide)
+    if looks_like_metric_pairs(kpi_texts):
+        return len(kpi_texts) // 2
+    n_metric = sum(1 for text in kpi_texts if is_metric_line(text))
+    n_label = sum(1 for text in kpi_texts if is_metric_label(text))
+    if n_metric >= 2 and n_metric == n_label:
+        return n_metric
     if n_kpi >= 4:
         return max(4, cols)
     if n_stmt >= 4 and cols <= 2:
@@ -706,6 +725,29 @@ def _dense_text_layout(tokens: dict[str, Any], layout_index: int) -> bool:
     )
 
 
+def _all_caps_heading_count(slide: dict[str, Any] | None) -> int:
+    """ALL-CAPS labels inside body copy (UNIFIED DATA / ETHICAL AI / STORYTELLING)."""
+    if not slide:
+        return 0
+    title = (slide.get("title_text") or "").strip()
+    count = 0
+    for shape in content_shapes(slide):
+        if shape.get("kind") != "text":
+            continue
+        ph = (shape.get("placeholder_type") or "").upper()
+        if ph in {"TITLE", "CENTER_TITLE", "VERTICAL_TITLE", "SUBTITLE"}:
+            continue
+        paras = ((shape.get("text_frame") or {}).get("paragraphs") or [])
+        lines = [((p.get("text") or "").strip()) for p in paras] if paras else [(shape.get("text") or "").strip()]
+        for line in lines:
+            compact = " ".join(line.split())
+            if not compact or compact == title or is_org_chrome(compact):
+                continue
+            if is_all_caps_heading(compact, max_words=6):
+                count += 1
+    return count
+
+
 def pick_prototype_layout(
     tokens: dict[str, Any],
     role: str,
@@ -723,6 +765,7 @@ def pick_prototype_layout(
     slots = _content_slot_count(slide)
     n_tables = sum(1 for s in (slide or {}).get("shapes") or [] if s.get("kind") == "table")
     n_charts = sum(1 for s in (slide or {}).get("shapes") or [] if s.get("kind") == "chart")
+    caps = _all_caps_heading_count(slide)
 
     if role == "TITLE":
         return prototype_index_matching(tokens, "cover layout") or default
@@ -730,6 +773,11 @@ def pick_prototype_layout(
         return prototype_index_matching(tokens, "closing slide") or default
     if role == "SECTION":
         return prototype_index_matching(tokens, "section divider") or default
+
+    if caps >= 3 and slots >= 3 and n_tables == 0:
+        found = prototype_index_matching(tokens, "three parts", "three parallel")
+        if found is not None:
+            return found
 
     if n_tables and n_pics == 0 and n_charts == 0 and slots < 3 and cols < 3:
         found = prototype_index_matching(tokens, "data table", "comparison")

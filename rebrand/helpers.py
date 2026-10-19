@@ -892,6 +892,138 @@ def is_org_chrome(text: str) -> bool:
     return bool(ORG_CHROME_RE.match(t))
 
 
+METRIC_LINE_RE = re.compile(
+    r"^[$~]?\d[\d,]*(?:\.\d+)?(?:\s*/\s*[$~]?\d[\d,]*)?(?:\s*(?:%|k|m|hrs?|hours|million|billion))?\s*$",
+    re.I,
+)
+MILLION_LINE_RE = re.compile(r"^\d+(?:\.\d+)?\s*(?:million|billion)\b", re.I)
+MONEY_CALLOUT_RE = re.compile(r"^\$[\d,]")
+
+
+def compact_text(text: str) -> str:
+    return " ".join((text or "").split())
+
+
+def is_metric_line(text: str) -> bool:
+    """True for a KPI token such as 312,000, ~10,000, 13 / 19, or 1 MILLION."""
+    t = compact_text(text)
+    if not t or len(t.split()) > 4:
+        return False
+    return bool(METRIC_LINE_RE.match(t) or MILLION_LINE_RE.match(t))
+
+
+def is_metric_label(text: str) -> bool:
+    """Short label that can sit under a KPI number (not another metric)."""
+    t = compact_text(text)
+    if not t or is_metric_line(t):
+        return False
+    words = t.split()
+    if not (1 <= len(words) <= 10):
+        return False
+    return not t.endswith((".", "!", "?"))
+
+
+def looks_like_metric_pairs(items: list[str]) -> bool:
+    """True when items alternate KPI number / label (312,000 + students reached)."""
+    cleaned = [compact_text(item) for item in items if compact_text(item)]
+    if len(cleaned) < 4 or len(cleaned) % 2:
+        return False
+    for i in range(0, len(cleaned), 2):
+        if not is_metric_line(cleaned[i]) or not is_metric_label(cleaned[i + 1]):
+            return False
+    return True
+
+
+def pair_metric_label_items(items: list[str]) -> list[list[str]] | None:
+    """Group KPI numbers with their labels. None when the list is not that pattern."""
+    cleaned = [item for item in items if compact_text(item)]
+    if looks_like_metric_pairs(cleaned):
+        return [[cleaned[i], cleaned[i + 1]] for i in range(0, len(cleaned), 2)]
+    if (
+        len(cleaned) >= 5
+        and not is_metric_line(cleaned[0])
+        and looks_like_metric_pairs(cleaned[1:])
+    ):
+        rest = cleaned[1:]
+        return [[rest[i], rest[i + 1]] for i in range(0, len(rest), 2)]
+    if (
+        len(cleaned) == 4
+        and is_metric_line(cleaned[0])
+        and is_metric_line(cleaned[1])
+        and is_metric_label(cleaned[2])
+        and is_metric_label(cleaned[3])
+    ):
+        return [[cleaned[0], cleaned[2]], [cleaned[1], cleaned[3]]]
+    return None
+
+
+def is_all_caps_heading(text: str, max_words: int = 8) -> bool:
+    t = compact_text(text)
+    if not t:
+        return False
+    words = t.split()
+    letters = "".join(ch for ch in t if ch.isalpha())
+    return bool(letters) and t == t.upper() and 1 <= len(words) <= max_words
+
+
+def is_title_like(text: str) -> bool:
+    """Slide titles (ALL-CAPS or short labels), not money sentences or captions."""
+    t = compact_text(text)
+    if not t or is_org_chrome(t):
+        return False
+    words = t.split()
+    if len(words) > 12:
+        return False
+    if MONEY_CALLOUT_RE.match(t) and len(words) > 4:
+        return False
+    if t.endswith((".", "!", "?")):
+        return False
+    if ":" in t and len(words) >= 6:
+        return False
+    if is_all_caps_heading(t):
+        return True
+    return 1 <= len(words) <= 8
+
+
+def looks_like_photo_caption(text: str) -> bool:
+    """Sentence-case photo labels ('Marsh survey site'), not INTRODUCING FOREVERGLADES."""
+    t = compact_text(text)
+    if not t or is_all_caps_heading(t):
+        return False
+    words = t.split()
+    if not (1 <= len(words) <= 16):
+        return False
+    letters = "".join(ch for ch in t if ch.isalpha())
+    if letters and t == t.upper():
+        return False
+    return True
+
+
+def title_candidate_score(text: str) -> int:
+    """Higher is a better slide title. Money callouts and long sentences lose."""
+    t = compact_text(text)
+    if not t:
+        return -100
+    words = t.split()
+    n = len(words)
+    score = 0
+    if 1 <= n <= 8:
+        score += 20
+    elif n <= 12:
+        score += 8
+    else:
+        score -= 12
+    if is_all_caps_heading(t):
+        score += 30
+    if MONEY_CALLOUT_RE.match(t) or (re.match(r"^[$~]?\d", t) and not is_metric_line(t)):
+        score -= 40
+    if t.endswith((".", "!", "?")) or (":" in t and n >= 6):
+        score -= 16
+    if is_org_chrome(t):
+        score -= 40
+    return score
+
+
 def is_decorative_icon(shape_or_image: dict[str, Any] | None) -> bool:
     """True for tiny PptxGenJS / UI glyphs — not photographs for photo wells.
 
