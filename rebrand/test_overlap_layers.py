@@ -14,10 +14,21 @@ sys.path.insert(0, str(ROOT))
 
 from pptx import Presentation  # noqa: E402
 from pptx.enum.shapes import MSO_SHAPE_TYPE  # noqa: E402
+from pptx.util import Inches  # noqa: E402
 
-from colorways import is_layout_chrome  # noqa: E402
+from colorways import (  # noqa: E402
+    _heading_text_fits,
+    is_layout_chrome,
+    prototype_text_slots,
+)
 from helpers import blob_hash  # noqa: E402
-from test_margins_images import KNIGHT, SAMPLE, TEMPLATE, _convert  # noqa: E402
+from test_margins_images import (  # noqa: E402
+    KNIGHT,
+    SAMPLE,
+    TEMPLATE,
+    _convert,
+    _template_content_photo_hashes,
+)
 
 EMU_PER_INCH = 914400
 
@@ -160,6 +171,176 @@ class KnightOverlapTests(unittest.TestCase):
                         found.add(digest)
                         self.assertFalse(shape._element.findall(f".//{{{A_NS}}}picLocks"))
             self.assertEqual(found, source_hashes)
+
+
+def _overlap(a, b) -> float:
+    aw, ah = max(1, int(a.width or 0)), max(1, int(a.height or 0))
+    left = max(int(a.left or 0), int(b.left or 0))
+    top = max(int(a.top or 0), int(b.top or 0))
+    right = min(int(a.left or 0) + aw, int(b.left or 0) + int(b.width or 0))
+    bottom = min(int(a.top or 0) + ah, int(b.top or 0) + int(b.height or 0))
+    if right <= left or bottom <= top:
+        return 0.0
+    return ((right - left) * (bottom - top)) / (aw * ah)
+
+
+def _write_two_points_results_source(path: Path) -> None:
+    """Claude Usage Results slide as two numbered cards (cover + closer so it is not TITLE/CLOSING)."""
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6]
+
+    cover = prs.slides.add_slide(blank)
+    title = cover.shapes.add_textbox(Inches(0.5), Inches(2.5), Inches(10.0), Inches(1.0))
+    title.text_frame.paragraphs[0].text = "Claude Usage"
+
+    results = prs.slides.add_slide(blank)
+    heading = results.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(12.2), Inches(0.5))
+    heading.text_frame.paragraphs[0].text = "Results & Time Saved"
+    left_h = results.shapes.add_textbox(Inches(0.5), Inches(1.7), Inches(6.0), Inches(0.8))
+    left_h.text_frame.paragraphs[0].text = "Verified output counts × minutes-per-task assumptions."
+    left_b = results.shapes.add_textbox(Inches(0.5), Inches(2.6), Inches(6.0), Inches(0.6))
+    left_b.text_frame.paragraphs[0].text = "~20 HOURS SAVED"
+    right_h = results.shapes.add_textbox(Inches(7.0), Inches(1.7), Inches(5.8), Inches(0.8))
+    right_h.text_frame.paragraphs[0].text = "~1,217 minutes across the last 60 days"
+    right_b = results.shapes.add_textbox(Inches(7.0), Inches(2.6), Inches(5.8), Inches(1.8))
+    right_b.text_frame.paragraphs[0].text = (
+        "Conversations account for the majority of time saved (93%), "
+        "reflecting the value of quick, iterative Q&A and drafting support alongside document-level work."
+    )
+
+    closer = prs.slides.add_slide(blank)
+    take = closer.shapes.add_textbox(Inches(0.5), Inches(2.5), Inches(10.0), Inches(1.0))
+    take.text_frame.paragraphs[0].text = "Key Takeaways"
+    prs.save(str(path))
+
+
+@unittest.skipUnless(TEMPLATE.exists(), "official template missing")
+class TwoPointsHeadingFitTests(unittest.TestCase):
+    def test_short_titles_fit_heading_wells_long_sentences_do_not(self):
+        prs = Presentation(str(TEMPLATE))
+        two = next(
+            slide
+            for slide in prs.slides
+            if any(
+                getattr(shape, "has_text_frame", False) and (shape.text_frame.text or "").strip() == "TWO POINTS"
+                for shape in slide.shapes
+            )
+        )
+        heading = next(
+            slot
+            for slot in prototype_text_slots(two)
+            if (slot.get("text") or "").strip() == "Bullet one"
+        )
+        self.assertTrue(_heading_text_fits("Grant Progress and Compliance", heading))
+        self.assertTrue(_heading_text_fits("CONNECTORS", heading))
+        self.assertTrue(_heading_text_fits("Key Funded Initiatives", heading))
+        self.assertFalse(
+            _heading_text_fits("Verified output counts × minutes-per-task assumptions.", heading),
+            "a wrapping sentence must not occupy the 0.55″ Bullet one well",
+        )
+        self.assertFalse(_heading_text_fits("~1,217 minutes across the last 60 days", heading))
+
+
+@unittest.skipUnless(TEMPLATE.exists(), "official template missing")
+class TwoPointsResultsOverlapTests(unittest.TestCase):
+    def test_results_two_points_has_one_layer_per_card(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "results-two-points.pptx"
+            _write_two_points_results_source(src)
+            result = _convert(TEMPLATE, src, Path(tmp) / "built")
+            prs = Presentation(str(result["output"]))
+            entry = next(e for e in result["plan"]["entries"] if e["source_index"] == 1)
+            self.assertEqual(entry.get("template_layout_name"), "Two Points")
+            slide = next(
+                s
+                for s in prs.slides
+                if "TWO POINTS" in "\n".join(_iter_text(s)) and "Results & Time Saved" in "\n".join(_iter_text(s))
+            )
+            blob = "\n".join(_iter_text(slide))
+            _assert_no_dummy(slide, "two points results")
+            self.assertIn("TWO POINTS", blob)
+            self.assertIn("Results & Time Saved", blob)
+            self.assertIn("Verified output counts", blob)
+            self.assertIn("HOURS SAVED", blob)
+            self.assertIn("1,217", blob)
+            self.assertIn("Conversations account", blob)
+            self.assertTrue(any(t.strip() == "01" for t in _iter_text(slide)))
+            self.assertTrue(any(t.strip() == "02" for t in _iter_text(slide)))
+
+            leftover_labels = [
+                t.strip()
+                for t in _iter_text(slide)
+                if t.strip().upper() in {"HOURS SAVED", "LABEL HERE"} or t.strip() == "HOURS SAVED"
+            ]
+            self.assertFalse(
+                leftover_labels,
+                f"prototype-style leftover labels still on the card: {leftover_labels}",
+            )
+
+            content = []
+            for shape in slide.shapes:
+                if not getattr(shape, "has_text_frame", False):
+                    continue
+                text = (shape.text_frame.text or "").strip()
+                if not text or is_layout_chrome(text) or text == "Results & Time Saved":
+                    continue
+                content.append(shape)
+                if int(shape.height or 0) <= int(0.7 * EMU_PER_INCH):
+                    self.assertLessEqual(
+                        len(" ".join(text.split())),
+                        36,
+                        f"heading well still holds overflowing copy {text[:60]!r}",
+                    )
+            for i, a in enumerate(content):
+                for b in content[i + 1 :]:
+                    self.assertLess(
+                        max(_overlap(a, b), _overlap(b, a)),
+                        0.12,
+                        f"two text frames occupy the same card {a.text_frame.text[:40]!r} vs {b.text_frame.text[:40]!r}",
+                    )
+
+            columns: list[list] = []
+            for shape in sorted(content, key=lambda s: (int(s.left or 0), int(s.top or 0))):
+                placed = False
+                center = int(shape.left or 0) + int(shape.width or 0) / 2
+                for col in columns:
+                    col_left = min(int(s.left or 0) for s in col)
+                    col_right = max(int(s.left or 0) + int(s.width or 0) for s in col)
+                    if col_left - int(0.4 * EMU_PER_INCH) <= center <= col_right + int(0.4 * EMU_PER_INCH):
+                        col.append(shape)
+                        placed = True
+                        break
+                if not placed:
+                    columns.append([shape])
+            self.assertGreaterEqual(len(columns), 2, "two point wells should remain")
+            for col in columns:
+                self.assertLessEqual(
+                    len(col),
+                    2,
+                    "each point well must be one heading + one body, not stacked leftover frames: "
+                    + repr([s.text_frame.text[:40] for s in col]),
+                )
+
+            stock = _template_content_photo_hashes(8)
+            found = {
+                blob_hash(pic.image.blob)
+                for pic in slide.shapes
+                if pic.shape_type in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}
+            }
+            self.assertTrue(
+                found & stock,
+                "Two Points must keep the unused bottom banner stock photo",
+            )
+            for pic in slide.shapes:
+                if pic.shape_type not in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}:
+                    continue
+                self.assertGreater(
+                    int(pic.width or 0),
+                    int(2.0 * EMU_PER_INCH),
+                    "UI icons must not occupy Two Points photo wells",
+                )
 
 
 if __name__ == "__main__":

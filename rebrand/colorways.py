@@ -32,6 +32,8 @@ from helpers import (
     content_safe_box,
     delete_shape,
     enum_name,
+    estimate_lines,
+    fits,
     hex_color,
     is_brand_lockup,
     is_decorative_icon,
@@ -103,6 +105,19 @@ HEADING_DUMMY_LABELS = {
     "phase four",
     "name of speaker",
 }
+PROTOTYPE_BODY_HINTS = (
+    "description text here",
+    "two lines of supporting copy",
+    "one sentence on what happens here",
+    "one line of description for this section",
+    "one line explaining what the figure counts",
+    "a sentence framing what this section",
+    "two or three sentences of body copy",
+    "a second short paragraph",
+    "section title goes here",
+    "a subtitle line goes here",
+    "title template",
+)
 EMU_INCH = 914400
 
 
@@ -805,6 +820,17 @@ def is_layout_chrome(text: str) -> bool:
     return False
 
 
+def is_leftover_prototype_copy(text: str) -> bool:
+    """True for unused sample-slide dummy that must not survive convert."""
+    t = (text or "").strip()
+    if not t or is_layout_chrome(t):
+        return False
+    low = t.lower()
+    if low in HEADING_DUMMY_LABELS:
+        return True
+    return any(hint in low for hint in PROTOTYPE_BODY_HINTS)
+
+
 def _write_paragraph_text(para, text: str) -> None:
     if para.runs:
         para.runs[0].text = text
@@ -899,16 +925,23 @@ def _fill_body_stack(slots: list[dict[str, Any]], texts: list[str]) -> list[Any]
     if not slots:
         return to_delete
     slots = sorted(slots, key=lambda s: (int(s["top"]), int(s["left"])))
-    primary = slots[0]
+    # Prefer the roomiest well so collapsed copy uses body type, not 33pt heading.
+    primary = max(slots, key=lambda s: int(s.get("height") or 0) * int(s.get("width") or 0))
     if len(slots) > 1:
-        bottom = max(int(s["top"]) + int(s["height"]) for s in slots)
+        left = min(int(s["left"]) for s in slots)
+        top = min(int(s["top"]) for s in slots)
         right = max(int(s["left"]) + int(s["width"]) for s in slots)
+        bottom = max(int(s["top"]) + int(s["height"]) for s in slots)
         try:
-            primary["shape"].height = int(bottom - int(primary["top"]))
-            primary["shape"].width = int(max(int(primary["width"]), right - int(primary["left"])))
+            primary["shape"].left = int(left)
+            primary["shape"].top = int(top)
+            primary["shape"].width = int(right - left)
+            primary["shape"].height = int(bottom - top)
         except Exception:
             pass
-        for extra in slots[1:]:
+        for extra in slots:
+            if extra is primary:
+                continue
             clear_shape_text(extra["shape"])
             to_delete.append(extra["shape"])
     if texts:
@@ -919,15 +952,32 @@ def _fill_body_stack(slots: list[dict[str, Any]], texts: list[str]) -> list[Any]
     return to_delete
 
 
+def _slot_font_pt(slot: dict[str, Any]) -> float:
+    shape = slot.get("shape")
+    if shape is not None and getattr(shape, "has_text_frame", False):
+        for para in shape.text_frame.paragraphs:
+            for run in para.runs:
+                if run.font.size is not None:
+                    return float(run.font.size.pt)
+    height = int(slot.get("height") or 0)
+    return 33.0 if height <= int(0.7 * EMU_INCH) else 24.0
+
+
 def _heading_text_fits(text: str, slot: dict[str, Any]) -> bool:
     """Long takeaway sentences must not be forced into a 0.55″ prototype heading."""
-    words = len((text or "").split())
+    t = (text or "").strip()
+    if not t:
+        return False
     height = int(slot.get("height") or 0)
-    if words <= 8 and height >= int(0.35 * EMU_INCH):
-        return True
-    lines_needed = max(1, (words + 5) // 6)
-    lines_avail = max(1, height // max(1, int(0.32 * EMU_INCH)))
-    return words <= 10 and lines_needed <= lines_avail
+    width = int(slot.get("width") or 0)
+    if height < int(0.35 * EMU_INCH) or width <= 0:
+        return False
+    font_pt = _slot_font_pt(slot)
+    lines = estimate_lines(t, font_pt, width)
+    if lines <= 1:
+        # Sample heading wells are one line of 33pt; 1.2 body leading is tighter than the box.
+        return font_pt * (EMU_INCH / 72) <= height * 1.2
+    return fits([t], font_pt, width, height)
 
 
 def _peel_lead_in(body_texts: list[str]) -> tuple[str, list[str]]:
@@ -1005,10 +1055,18 @@ def fill_text_slots(slide, title: str, subtitle: str, body_paras: list[str]) -> 
             body_texts = extra_lines + body_texts
     columns = _cluster_columns(content)
     if len(columns) >= 2 and len(body_texts) >= 2:
-        for col, chunk in zip(columns, _split_into(body_texts, len(columns))):
+        chunks = _split_into(body_texts, len(columns))
+        for i, col in enumerate(columns):
+            chunk = chunks[i] if i < len(chunks) else []
             to_delete.extend(_fill_column(col, chunk))
     else:
         to_delete.extend(_fill_column(content, body_texts))
+    for shape in list(slide.shapes):
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        if is_leftover_prototype_copy(shape.text_frame.text or ""):
+            clear_shape_text(shape)
+            to_delete.append(shape)
     for shape in to_delete:
         try:
             delete_shape(shape)
