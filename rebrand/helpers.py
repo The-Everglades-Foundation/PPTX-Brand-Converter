@@ -866,8 +866,10 @@ def is_decorative_icon(shape_or_image: dict[str, Any] | None) -> bool:
     """True for tiny PptxGenJS / UI glyphs — not photographs for photo wells.
 
     256px transparent PNGs (document, gear, lightning) must not pick PEOPLE
-    portraits or a full-bleed Kicker well. A low-res blob that already
-    occupies a real photo area on the slide is still a photograph.
+    portraits, Sequence card frames, or a full-bleed Kicker well — even when
+    the source scaled the glyph onto a KPI tile. A *low-res* blob that already
+    occupies a real photo area (sample marsh ~120px filling the slide) is still
+    a photograph.
     """
     if not shape_or_image:
         return False
@@ -878,21 +880,25 @@ def is_decorative_icon(shape_or_image: dict[str, Any] | None) -> bool:
         area = float(shape_or_image.get("area_ratio") or 0)
     except (TypeError, ValueError):
         area = 0.0
-    if area >= 0.08:
-        return False
     px = image.get("px") or [0, 0]
     try:
         width, height = int(px[0] or 0), int(px[1] or 0)
     except (TypeError, ValueError, IndexError):
         width = height = 0
-    if width and height and max(width, height) <= 256:
-        return True
+    px_max = max(width, height) if width and height else 0
     try:
         nbytes = int(image.get("bytes") or 0)
     except (TypeError, ValueError):
         nbytes = 0
     ext = str(image.get("ext") or image.get("content_type") or "").lower()
-    if width and height and max(width, height) <= 512 and 0 < nbytes < 20000 and "png" in ext:
+    # Stretched thumbnail filling a hero well (120px marsh @ 46% area) is a photo.
+    if px_max and px_max <= 160 and area >= 0.15:
+        return False
+    if px_max and px_max <= 256:
+        return True
+    if px_max <= 512 and 0 < nbytes < 20000 and "png" in ext:
+        if area >= 0.15:
+            return False
         return True
     return False
 

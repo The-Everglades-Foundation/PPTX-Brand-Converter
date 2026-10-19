@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 from colorways import (  # noqa: E402
     apply_colorway,
     bring_picture_to_front,
+    collapse_overlapping_text,
     duplicate_slide,
     fill_text_slots,
     patch_theme_part,
@@ -26,6 +27,7 @@ from colorways import (  # noqa: E402
     place_source_photos,
     promote_text_into_empty_cards,
     purge_empty_table_chrome,
+    purge_rules_over_text,
     _placement_is_icon,
     remap_srgb_in_slide,
     sanitize_new_picture,
@@ -551,6 +553,8 @@ def fill_prototype_slide(slide, entry: dict[str, Any], tokens: dict[str, Any], b
     place_source_photos(slide, pictures, tokens, flags)
     place_icon_pictures(slide, icons, tokens)
     promote_text_into_empty_cards(slide, tokens)
+    purge_rules_over_text(slide, tokens)
+    collapse_overlapping_text(slide)
     if any(p.get("kind") in {"table", "chart"} for p in rest_deferred):
         purge_empty_table_chrome(slide, tokens)
     rest_deferred.sort(

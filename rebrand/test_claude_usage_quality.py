@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent
 sys.path.insert(0, str(ROOT))
 
+from colorways import is_layout_chrome  # noqa: E402
 from helpers import is_decorative_icon  # noqa: E402
 from test_margins_images import TEMPLATE, _convert  # noqa: E402
 from test_overlap_layers import LEFTOVER_DUMMY, _assert_no_dummy, _iter_text  # noqa: E402
@@ -46,8 +47,10 @@ def _write_claude_like_source(path: Path) -> None:
     blank = prs.slide_layouts[6]
     icon = _icon_png()
 
-    # Cover: three side-by-side title boxes + empty decorative cards.
+    # Cover: org chrome above three side-by-side title boxes + empty decorative cards.
     s = prs.slides.add_slide(blank)
+    org = s.shapes.add_textbox(Inches(0.5), Inches(0.25), Inches(6.0), Inches(0.4))
+    org.text_frame.paragraphs[0].text = "EVERGLADES FOUNDATION"
     for i, text in enumerate(("Claude Usage", "Executive Summary", "60-Day Adoption Review  •  Prepared for Leadership")):
         box = s.shapes.add_textbox(Inches(0.5 + i * 4.2), Inches(2.8), Inches(3.9), Inches(1.4))
         box.text_frame.paragraphs[0].text = text
@@ -229,6 +232,10 @@ class IconDetectTests(unittest.TestCase):
             is_decorative_icon({"image": {"px": [120, 120], "bytes": 237, "ext": "png"}, "area_ratio": 0.46}),
             "a low-res blob that already fills a photo well is still a photograph",
         )
+        self.assertTrue(
+            is_decorative_icon({"image": {"px": [256, 256], "bytes": 4000, "ext": "png"}, "area_ratio": 0.10}),
+            "a 256px UI glyph scaled onto a KPI card is still an icon, not a photo well",
+        )
 
 
 @unittest.skipUnless(TEMPLATE.exists(), "official template missing")
@@ -257,7 +264,9 @@ class ClaudeUsageConvertTests(unittest.TestCase):
         self.assertNotIn("THREE PARTS", blob)
         self.assertNotIn("PEOPLE", blob)
         self.assertIn("Claude Usage", blob)
+        self.assertNotIn("EVERGLADES FOUNDATION", blob)
         self.assertEqual(self._entry(0)["role"], "TITLE")
+        self.assertEqual((self._entry(0).get("placements") or [{}])[0].get("text") or "Claude Usage", "Claude Usage")
 
     def test_overview_is_not_people_portraits(self):
         overview = next(s for s in self.prs.slides if "Overview" in "\n".join(_iter_text(s)))
@@ -267,12 +276,39 @@ class ClaudeUsageConvertTests(unittest.TestCase):
         self.assertNotIn("TWO POINTS", blob)
         self.assertNotIn("Full name", blob)
         self.assertTrue("CONTENTS" in blob or "SEQUENCE" in blob)
+        self.assertIn("13 / 19", blob)
+        self.assertIn("Time Saved", blob)
         for pic in _picture_shapes(overview):
             self.assertLess(
                 int(pic.width or 0),
                 int(1.5 * EMU),
                 "256px icons must not occupy 4-inch portrait wells",
             )
+            try:
+                blob = pic.image.blob
+                with Image.open(io.BytesIO(blob)) as im:
+                    px = max(im.size)
+            except Exception:
+                px = 9999
+            self.assertGreater(
+                px,
+                256,
+                "UI icons must not be placed as pictures on Overview Sequence/cards",
+            )
+        texts = [
+            s
+            for s in overview.shapes
+            if getattr(s, "has_text_frame", False)
+            and (s.text_frame.text or "").strip()
+            and not is_layout_chrome((s.text_frame.text or "").strip())
+        ]
+        for i, a in enumerate(texts):
+            for b in texts[i + 1 :]:
+                self.assertLess(
+                    max(_overlap(a, b), _overlap(b, a)),
+                    0.12,
+                    f"Overview text layers overlap {a.text_frame.text[:40]!r} vs {b.text_frame.text[:40]!r}",
+                )
 
     def test_tables_and_charts_do_not_cover_titles(self):
         for slide in self.prs.slides:
@@ -324,7 +360,40 @@ class ClaudeUsageConvertTests(unittest.TestCase):
         blob = "\n".join(_iter_text(take))
         self.assertIn("THREE PARTS", blob)
         self.assertIn("Adoption is growing quickly", blob)
+        self.assertIn("The Science team is the primary adopter", blob)
         self.assertNotIn("Concept one", blob)
+        texts = [
+            s
+            for s in take.shapes
+            if getattr(s, "has_text_frame", False)
+            and (s.text_frame.text or "").strip()
+            and not is_layout_chrome((s.text_frame.text or "").strip())
+            and (s.text_frame.text or "").strip() != "Key Takeaways"
+        ]
+        for i, a in enumerate(texts):
+            for b in texts[i + 1 :]:
+                self.assertLess(
+                    max(_overlap(a, b), _overlap(b, a)),
+                    0.12,
+                    f"Takeaways stacked layers {a.text_frame.text[:50]!r} vs {b.text_frame.text[:50]!r}",
+                )
+
+    def test_no_stacked_content_text_on_any_slide(self):
+        for i, slide in enumerate(self.prs.slides):
+            texts = [
+                s
+                for s in slide.shapes
+                if getattr(s, "has_text_frame", False)
+                and (s.text_frame.text or "").strip()
+                and not is_layout_chrome((s.text_frame.text or "").strip())
+            ]
+            for a_i, a in enumerate(texts):
+                for b in texts[a_i + 1 :]:
+                    self.assertLess(
+                        max(_overlap(a, b), _overlap(b, a)),
+                        0.12,
+                        f"slide {i + 1} overlapping copy {a.text_frame.text[:40]!r} vs {b.text_frame.text[:40]!r}",
+                    )
 
     def test_who_is_using_splits_tables_off_three_parts(self):
         who_entries = [e for e in self.plan["entries"] if e["source_index"] == 2]
