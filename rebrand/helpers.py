@@ -736,6 +736,24 @@ def content_safe_box(tokens: dict[str, Any], layout_index: int | None = None) ->
     return _shrink_for_chrome(clamp_box_to_slide(box, width, height), tokens)
 
 
+def data_content_box(tokens: dict[str, Any], layout_index: int | None = None) -> dict[str, int]:
+    """Full content well under the title band, down to the slide floor.
+
+    Comparison sample art only paints five dummy rows. When a table (or chart)
+    *is* the slide, use the remaining canvas instead of that leftover strip.
+    """
+    slide_w = int(tokens["slide_width"])
+    slide_h = int(tokens["slide_height"])
+    safe = content_safe_box(tokens, layout_index)
+    top = max(int(safe["top"]), int(slide_h * 0.22))
+    floor = slide_h - int(0.32 * EMU_PER_INCH)
+    return clamp_box_to_slide(
+        as_box(int(safe["left"]), top, int(safe["width"]), max(int(1.2 * EMU_PER_INCH), floor - top)),
+        slide_w,
+        slide_h,
+    )
+
+
 def _shrink_for_chrome(box: dict[str, int], tokens: dict[str, Any]) -> dict[str, int]:
     left, top, width, height = box["left"], box["top"], box["width"], box["height"]
     right, bottom = left + width, top + height

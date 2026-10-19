@@ -201,11 +201,20 @@ def classify_source_slide(index: int, total: int, title: str, subtitle: str, sha
         and not s.get("drop_footer")
         and not (s.get("kind") == "picture" and is_decorative_icon(s))
         and not (s.get("kind") == "text" and not (s.get("text") or "").strip())
+        and (s.get("text") or "").strip() != title_norm
     ]
     if _two_side_by_side(spatial_blocks, slide_w):
-        return "TWO_CONTENT"
+        text_only = [b for b in spatial_blocks if b.get("kind") == "text"]
+        table_blocks = [b for b in spatial_blocks if b.get("kind") == "table"]
+        caption_with_table = bool(table_blocks) and len(text_only) <= 1 and all(
+            len((b.get("text") or "").split()) <= 40 for b in text_only
+        )
+        if not caption_with_table:
+            return "TWO_CONTENT"
 
     if (tables or charts) and len(text_blocks) <= 1:
+        if tables and (not body_text or len(body_text.split()) <= 40):
+            return "TITLE_ONLY"
         if body_text and len(body_text.split()) > 12:
             return "TITLE_BODY"
         return "TITLE_ONLY"
