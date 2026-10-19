@@ -253,7 +253,7 @@ def image_parity(manifest: dict[str, Any], out_prs, tokens: dict[str, Any] | Non
         for shape in slide.get("shapes") or []:
             if shape.get("kind") != "picture":
                 continue
-            if shape.get("drop_logo"):
+            if shape.get("drop_logo") or shape.get("drop_icon"):
                 dropped.append(f"slide {slide['index'] + 1} {shape.get('name')}")
             else:
                 src += 1

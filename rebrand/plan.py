@@ -67,6 +67,7 @@ def content_shapes(slide: dict[str, Any]) -> list[dict[str, Any]]:
         if s.get("kind") != "group"
         and not s.get("drop_footer")
         and not s.get("drop_logo")
+        and not s.get("drop_icon")
     ]
 
 
@@ -87,13 +88,18 @@ def title_shape(slide: dict[str, Any]) -> dict[str, Any] | None:
 def split_text_blocks(slide: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     title = title_shape(slide)
     title_id = title.get("id") if title else None
+    title_text = (slide.get("title_text") or "").strip()
+    subtitle_text = (slide.get("subtitle_text") or "").strip()
     blocks = []
     others = []
     for shape in content_shapes(slide):
         if shape.get("id") == title_id:
             continue
         ph = (shape.get("placeholder_type") or "").upper()
-        if ph in {"TITLE", "CENTER_TITLE", "VERTICAL_TITLE"}:
+        if ph in {"TITLE", "CENTER_TITLE", "VERTICAL_TITLE", "SUBTITLE"}:
+            continue
+        text = (shape.get("text") or "").strip()
+        if text and text in {title_text, subtitle_text}:
             continue
         if shape.get("kind") == "text" and shape.get("text_frame"):
             blocks.append(shape)
@@ -520,6 +526,72 @@ def _text_column_count(slide: dict[str, Any] | None) -> int:
     return groups
 
 
+def _is_full_width_block(shape: dict[str, Any], blocks: list[dict[str, Any]]) -> bool:
+    bounds = shape.get("bounds") or {}
+    width = int(bounds.get("width") or 0)
+    if not width or not blocks:
+        return False
+    rights = [
+        int((s.get("bounds") or {}).get("left") or 0) + int((s.get("bounds") or {}).get("width") or 0)
+        for s in blocks
+    ]
+    span = max(rights) - min(int((s.get("bounds") or {}).get("left") or 0) for s in blocks)
+    return width >= int(span * 0.72) if span else False
+
+
+def _content_slot_count(slide: dict[str, Any] | None) -> int:
+    """Cards the copy wants: KPI tiles, ALL-CAPS labels, or long statements.
+
+    Spatial x-clustering undercounts PptxGenJS 2-col stacks of 3–5 items, so
+    Who's Using / Agentic / Takeaways were landing on Two Points.
+    """
+    if not slide:
+        return 0
+    title = title_shape(slide)
+    title_id = title.get("id") if title else None
+    title_text = (slide.get("title_text") or "").strip()
+    blocks: list[dict[str, Any]] = []
+    for shape in content_shapes(slide):
+        if shape.get("id") == title_id:
+            continue
+        if shape.get("kind") != "text":
+            continue
+        text = (shape.get("text") or "").strip()
+        if not text or text == title_text:
+            continue
+        ph = (shape.get("placeholder_type") or "").upper()
+        if ph in {"TITLE", "CENTER_TITLE", "VERTICAL_TITLE", "SUBTITLE"}:
+            continue
+        blocks.append(shape)
+    if not blocks:
+        return 0
+    n_caps = 0
+    n_stmt = 0
+    n_kpi = 0
+    for shape in blocks:
+        if _is_full_width_block(shape, blocks):
+            continue
+        text = (shape.get("text") or "").strip()
+        words = text.split()
+        letters = "".join(ch for ch in text if ch.isalpha())
+        if letters and text.upper() == text and 1 <= len(words) <= 6:
+            n_caps += 1
+        elif len(words) >= 12:
+            n_stmt += 1
+        elif len(words) <= 8:
+            n_kpi += 1
+    cols = _text_column_count(slide)
+    if n_kpi >= 4:
+        return max(4, cols)
+    if n_stmt >= 4 and cols <= 2:
+        return n_stmt
+    if n_caps >= 3 or n_stmt == 3:
+        return 3
+    if n_stmt >= 4:
+        return max(3, cols)
+    return cols
+
+
 def _dense_text_layout(tokens: dict[str, Any], layout_index: int) -> bool:
     proto = next(
         (p for p in tokens.get("prototypes") or [] if int(p.get("index") or -1) == int(layout_index)),
@@ -559,6 +631,7 @@ def pick_prototype_layout(
     real = [p for p in pictures if not is_decorative_icon(p)]
     n_pics = len(real)
     cols = _text_column_count(slide)
+    slots = _content_slot_count(slide)
     n_tables = sum(1 for s in (slide or {}).get("shapes") or [] if s.get("kind") == "table")
     n_charts = sum(1 for s in (slide or {}).get("shapes") or [] if s.get("kind") == "chart")
 
@@ -575,14 +648,16 @@ def pick_prototype_layout(
             return found
 
     if not n_pics:
-        if cols >= 4:
+        if slots >= 5 and cols <= 2:
+            return prototype_index_matching(tokens, "contents or any numbered", "contents") or default
+        if slots >= 4 or cols >= 4:
             return (
                 prototype_index_matching(tokens, "timeline or process", "sequence")
                 or prototype_index_matching(tokens, "contents or any numbered", "contents")
                 or default
             )
-        if role == "TWO_CONTENT" or cols >= 2:
-            if cols >= 3:
+        if role == "TWO_CONTENT" or slots >= 2 or cols >= 2:
+            if slots >= 3 or cols >= 3:
                 return prototype_index_matching(tokens, "three parts", "three parallel") or default
             return prototype_index_matching(tokens, "two-point", "two points") or default
         if role == "TITLE_BODY":

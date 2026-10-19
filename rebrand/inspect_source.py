@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import re
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ from helpers import (  # noqa: E402
 
 TITLE_TYPE_NAMES = {"TITLE", "CENTER_TITLE", "VERTICAL_TITLE"}
 SUBTITLE_TYPE_NAMES = {"SUBTITLE"}
+ORG_CHROME_RE = re.compile(r"^(the\s+)?everglades\s+foundation$", re.I)
 
 
 def _bounds(shape, left: int, top: int) -> dict[str, int]:
@@ -230,12 +232,25 @@ def _two_side_by_side(blocks: list[dict[str, Any]], slide_w: int) -> bool:
     return bool(left) and bool(right) and len(blocks) >= 2
 
 
+def _is_org_chrome(text: str) -> bool:
+    t = " ".join((text or "").split())
+    return bool(ORG_CHROME_RE.match(t))
+
+
+def _title_ready(shape: dict[str, Any]) -> str:
+    text = (shape.get("text") or "").strip()
+    if not text or shape.get("drop_footer") or _is_org_chrome(text):
+        return ""
+    return text
+
+
 def pick_title(shapes: list[dict[str, Any]]) -> tuple[str, str]:
+    """Pick cover/slide title, skipping org lockup chrome like EVERGLADES FOUNDATION."""
     title = ""
     subtitle = ""
     for shape in shapes:
         ph = shape.get("placeholder_type") or ""
-        text = (shape.get("text") or "").strip()
+        text = _title_ready(shape)
         if not text:
             continue
         if ph in TITLE_TYPE_NAMES and not title:
@@ -243,16 +258,35 @@ def pick_title(shapes: list[dict[str, Any]]) -> tuple[str, str]:
         elif ph in SUBTITLE_TYPE_NAMES and not subtitle:
             subtitle = text
     if not title:
-        named = [s for s in shapes if "title" in (s.get("name") or "").lower() and (s.get("text") or "").strip()]
+        named = [s for s in shapes if "title" in (s.get("name") or "").lower() and _title_ready(s)]
         if named:
             title = named[0]["text"].strip()
     if not title:
-        texts = [s for s in shapes if s.get("kind") == "text" and (s.get("text") or "").strip() and not s.get("drop_footer")]
+        texts = [s for s in shapes if s.get("kind") == "text" and _title_ready(s)]
         texts.sort(key=lambda s: (int(s["bounds"]["top"]), int(s["bounds"]["left"])))
-        if texts:
+        shorts = [s for s in texts if len((s.get("text") or "").split()) <= 16]
+        if shorts:
+            title = shorts[0]["text"].strip()
+            title_top = int((shorts[0].get("bounds") or {}).get("top") or 0)
+            if not subtitle:
+                for extra in shorts[1:]:
+                    second = extra["text"].strip()
+                    words = second.split()
+                    extra_top = int((extra.get("bounds") or {}).get("top") or 0)
+                    if second == title:
+                        continue
+                    if extra_top > title_top + int(1.2 * 914400):
+                        continue
+                    if len(words) > 8 or any(ch in second for ch in ".!?—"):
+                        continue
+                    subtitle = second
+                    break
+        elif texts:
             candidate = texts[0]["text"].strip()
             if len(candidate.split()) <= 16:
                 title = candidate
+    if subtitle and _is_org_chrome(subtitle):
+        subtitle = ""
     return title, subtitle
 
 
@@ -271,6 +305,9 @@ def inspect_source(source_path: Path, out_dir: Path) -> dict[str, Any]:
         shapes = []
         for shape, left, top in iter_shapes_abs(slide.shapes):
             rec = inspect_shape(shape, left, top, slide_w, slide_h, media_dir, index, pic_n)
+            rec["drop_icon"] = rec.get("kind") == "picture" and is_decorative_icon(rec)
+            if _is_org_chrome(rec.get("text") or ""):
+                rec["drop_footer"] = True
             if rec.get("kind") == "picture":
                 pic_n += 1
                 digest = (rec.get("image") or {}).get("hash")

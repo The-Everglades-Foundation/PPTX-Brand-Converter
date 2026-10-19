@@ -919,6 +919,31 @@ def _fill_body_stack(slots: list[dict[str, Any]], texts: list[str]) -> list[Any]
     return to_delete
 
 
+def _heading_text_fits(text: str, slot: dict[str, Any]) -> bool:
+    """Long takeaway sentences must not be forced into a 0.55″ prototype heading."""
+    words = len((text or "").split())
+    height = int(slot.get("height") or 0)
+    if words <= 8 and height >= int(0.35 * EMU_INCH):
+        return True
+    lines_needed = max(1, (words + 5) // 6)
+    lines_avail = max(1, height // max(1, int(0.32 * EMU_INCH)))
+    return words <= 10 and lines_needed <= lines_avail
+
+
+def _peel_lead_in(body_texts: list[str]) -> tuple[str, list[str]]:
+    """Full-width intro sentences belong under the title, not in KPI card 1."""
+    if len(body_texts) < 5:
+        return "", body_texts
+    first = body_texts[0]
+    if len(first.split()) < 16:
+        return "", body_texts
+    rest = body_texts[1:]
+    shortish = sum(1 for item in rest if len(item.split()) <= 10)
+    if shortish >= 4:
+        return first, rest
+    return "", body_texts
+
+
 def _fill_column(slots: list[dict[str, Any]], texts: list[str]) -> list[Any]:
     if not slots:
         return []
@@ -929,10 +954,24 @@ def _fill_column(slots: list[dict[str, Any]], texts: list[str]) -> list[Any]:
             clear_shape_text(slot["shape"])
             deleted.append(slot["shape"])
         return deleted
-    if _looks_like_heading_slot(slots[0]) and len(slots) >= 2:
-        replace_shape_text(slots[0]["shape"], texts[0])
+    heading = slots[0]
+    if (
+        _looks_like_heading_slot(heading)
+        and len(slots) >= 2
+        and _heading_text_fits(texts[0], heading)
+    ):
+        replace_shape_text(heading["shape"], texts[0])
         return _fill_body_stack(slots[1:], texts[1:])
+    # One well per card: long copy + leftover dummy frames collapse together
+    # so heading overflow cannot stack on a second text layer.
     return _fill_body_stack(slots, texts)
+
+
+def _wide_slot(slots: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for slot in slots:
+        if int(slot.get("width") or 0) >= int(8.0 * EMU_INCH) and int(slot.get("height") or 0) <= int(1.4 * EMU_INCH):
+            return slot
+    return None
 
 
 def fill_text_slots(slide, title: str, subtitle: str, body_paras: list[str]) -> None:
@@ -947,11 +986,23 @@ def fill_text_slots(slide, title: str, subtitle: str, body_paras: list[str]) -> 
         if not title:
             delete_shape(title_slot["shape"])
             title_slot = None
-    body_texts: list[str] = []
-    if subtitle:
-        body_texts.append(subtitle)
-    body_texts.extend([p for p in body_paras if p])
+    body_texts: list[str] = [
+        p for p in body_paras if p and p != (title or "").strip() and p != (subtitle or "").strip()
+    ]
     to_delete: list[Any] = []
+    lead, body_texts = _peel_lead_in(body_texts)
+    extra_lines = [line for line in (subtitle, lead) if line]
+    columns_preview = _cluster_columns(content)
+    if extra_lines:
+        wide = _wide_slot(content)
+        if wide is not None:
+            replace_shape_text(wide["shape"], "\n".join(extra_lines))
+            content = [s for s in content if s is not wide]
+        elif len(columns_preview) >= 4:
+            # Sequence KPI tiles: never mash a full-width intro into card 1.
+            pass
+        else:
+            body_texts = extra_lines + body_texts
     columns = _cluster_columns(content)
     if len(columns) >= 2 and len(body_texts) >= 2:
         for col, chunk in zip(columns, _split_into(body_texts, len(columns))):
@@ -1254,8 +1305,36 @@ def _placement_is_icon(placement: dict[str, Any], tokens: dict[str, Any] | None 
     return bool(img_w and img_h and max(int(img_w), int(img_h)) <= 256)
 
 
+def _dense_text_prototype(tokens: dict[str, Any]) -> bool:
+    idx = tokens.get("_layout_index")
+    proto = next(
+        (p for p in tokens.get("prototypes") or [] if int(p.get("index") or -1) == int(idx or -1)),
+        None,
+    )
+    blob = f"{(proto or {}).get('name') or ''} {(proto or {}).get('notes') or ''}".lower()
+    return any(
+        token in blob
+        for token in (
+            "sequence",
+            "three parts",
+            "two points",
+            "contents",
+            "people",
+            "kicker",
+            "the point",
+            "by the numbers",
+            "cover layout",
+        )
+    )
+
+
 def place_icon_pictures(slide, placements: list[dict[str, Any]], tokens: dict[str, Any]) -> None:
-    """Keep tiny UI glyphs small so they never occupy a photo well."""
+    """Never stamp UI glyphs onto Sequence/card frames or leftover photo wells.
+
+    Decorative 256px icons are dropped (drop_icon) so they cannot sit on copy.
+    """
+    if _dense_text_prototype(tokens):
+        return
     icons: list[tuple[bytes, int | None, int | None]] = []
     for placement in placements:
         loaded = _load_picture_blob(placement)
@@ -1338,7 +1417,7 @@ def promote_text_into_empty_cards(slide, tokens: dict[str, Any]) -> None:
             if not getattr(shape, "has_text_frame", False):
                 continue
             text = (shape.text_frame.text or "").strip()
-            if not text:
+            if not text or is_layout_chrome(text):
                 continue
             other = _shape_box(shape)
             cx = other["left"] + other["width"] / 2
@@ -1350,16 +1429,90 @@ def promote_text_into_empty_cards(slide, tokens: dict[str, Any]) -> None:
         nested.sort(key=lambda s: int(s.top or 0))
         y = box["top"] + pad
         inner_h = box["height"] - 2 * pad
-        share = max(int(0.4 * EMU_INCH), inner_h // max(1, len(nested)))
+        share = max(int(0.5 * EMU_INCH), inner_h // max(1, len(nested)))
         for shape in nested:
             try:
                 shape.top = int(y)
                 shape.left = int(box["left"] + pad)
                 shape.width = int(max(int(0.8 * EMU_INCH), box["width"] - 2 * pad))
-                shape.height = int(min(int(shape.height or share), share))
+                shape.height = int(share)
             except Exception:
                 continue
             y += int(shape.height or share) + gap
+
+
+def purge_rules_over_text(slide, tokens: dict[str, Any]) -> None:
+    """Drop prototype lime hairlines that cut through source type."""
+    slide_w = int(tokens["slide_width"])
+    texts = []
+    for shape in slide.shapes:
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        text = (shape.text_frame.text or "").strip()
+        if not text or is_layout_chrome(text):
+            continue
+        texts.append(_shape_box(shape))
+    if not texts:
+        return
+    for shape in list(slide.shapes):
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            continue
+        if getattr(shape, "has_text_frame", False) and (shape.text_frame.text or "").strip():
+            continue
+        box = _shape_box(shape)
+        hairline = box["height"] <= int(0.08 * EMU_INCH) and box["width"] >= int(slide_w * 0.08)
+        if not hairline:
+            continue
+        cuts = False
+        for text in texts:
+            y_hit = text["top"] < box["top"] < text["top"] + text["height"]
+            x_hit = not (box["left"] + box["width"] < text["left"] or box["left"] > text["left"] + text["width"])
+            if y_hit and x_hit:
+                cuts = True
+                break
+            if overlap_fraction(box, text) > 0.02:
+                cuts = True
+                break
+        if cuts:
+            try:
+                delete_shape(shape)
+            except Exception:
+                continue
+
+
+def collapse_overlapping_text(slide) -> None:
+    """Delete leftover copy layers that sit on top of the same card well."""
+    items: list[tuple[Any, dict[str, int], str]] = []
+    for shape in list(slide.shapes):
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        text = (shape.text_frame.text or "").strip()
+        if not text or is_layout_chrome(text):
+            continue
+        items.append((shape, _shape_box(shape), text))
+    deleted: set[int] = set()
+    for i, (shape_a, box_a, text_a) in enumerate(items):
+        if id(shape_a) in deleted:
+            continue
+        for shape_b, box_b, text_b in items[i + 1 :]:
+            if id(shape_b) in deleted:
+                continue
+            frac = max(overlap_fraction(box_a, box_b), overlap_fraction(box_b, box_a))
+            if frac < 0.12:
+                continue
+            area_a = max(1, box_a["width"] * box_a["height"])
+            area_b = max(1, box_b["width"] * box_b["height"])
+            keep, drop, keep_text, drop_text = (
+                (shape_a, shape_b, text_a, text_b) if area_a >= area_b else (shape_b, shape_a, text_b, text_a)
+            )
+            if drop_text and drop_text not in keep_text and keep_text not in drop_text:
+                replace_shape_text(keep, keep_text + "\n" + drop_text)
+            try:
+                clear_shape_text(drop)
+                delete_shape(drop)
+            except Exception:
+                continue
+            deleted.add(id(drop))
 
 
 def place_source_photos(
