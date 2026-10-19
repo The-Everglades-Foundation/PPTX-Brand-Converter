@@ -25,6 +25,7 @@ from colorways import (  # noqa: E402
     place_source_photos,
     remap_srgb_in_slide,
     sanitize_new_picture,
+    stack_copy_above_photos,
 )
 from helpers import (  # noqa: E402
     add_rebuilt_chart,
@@ -468,6 +469,7 @@ def fill_prototype_slide(slide, entry: dict[str, Any], tokens: dict[str, Any], b
             add_line(slide, placement, tokens)
         elif kind == "media":
             add_media_placeholder(slide, placement, tokens, brand, flags)
+    stack_copy_above_photos(slide, tokens)
 
 
 def fill_layout_slide(slide, entry: dict[str, Any], tokens: dict[str, Any], brand: dict[str, Any], flags: list[str], work: dict[str, Any]) -> None:
