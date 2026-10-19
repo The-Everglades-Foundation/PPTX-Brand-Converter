@@ -37,6 +37,7 @@ from helpers import (
     hex_color,
     is_brand_lockup,
     is_decorative_icon,
+    is_org_chrome,
     iter_shapes_abs,
     maybe_recompress,
     overlap_fraction,
@@ -895,10 +896,68 @@ def _cluster_columns(slots: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     return groups
 
 
+_SPLIT_MARKER_RE = re.compile(r"^(?:(?:step|phase)\s+\d+\b|\d+\s*[·.)-])", re.I)
+
+
+def _is_split_heading(text: str) -> bool:
+    compact = " ".join((text or "").split())
+    if not compact:
+        return False
+    if _SPLIT_MARKER_RE.match(compact):
+        return True
+    if " — " in compact or " – " in compact:
+        label = compact.split(" — ")[0].split(" – ")[0]
+        return 1 <= len(label.split()) <= 8
+    return 1 <= len(compact.split()) <= 8 and not compact.endswith((".", "!", "?"))
+
+
+def _heading_group_starts(items: list[str]) -> list[int]:
+    markers = [i for i, text in enumerate(items) if _SPLIT_MARKER_RE.match(" ".join(text.split()))]
+    starts: list[int] = []
+    if len(markers) >= 2:
+        starts.extend(markers)
+        for i, text in enumerate(items):
+            if i in starts or (i and (i - 1) in starts):
+                continue
+            compact = " ".join(text.split())
+            if " — " in compact or " – " in compact:
+                continue
+            if 1 <= len(compact.split()) <= 6 and not compact.endswith((".", "!", "?")):
+                starts.append(i)
+        return sorted(starts)
+    for i, text in enumerate(items):
+        if _is_split_heading(text):
+            starts.append(i)
+    return starts
+
+
+def _distribute_groups(groups: list[list[str]], n: int) -> list[list[str]]:
+    if n <= 1:
+        return [[part for group in groups for part in group]]
+    if len(groups) <= n:
+        return groups + [[] for _ in range(n - len(groups))]
+    head = groups[: n - 1]
+    tail = [part for group in groups[n - 1 :] for part in group]
+    return head + [tail]
+
+
 def _split_into(items: list[str], n: int) -> list[list[str]]:
     if n <= 1:
         return [items]
-    if len(items) >= n * 2 and len(items) % 2 == 0:
+    starts = _heading_group_starts(items)
+    if len(starts) >= 2:
+        groups = []
+        for i, start in enumerate(starts):
+            end = starts[i + 1] if i + 1 < len(starts) else len(items)
+            groups.append(items[start:end])
+        if starts[0] > 0:
+            groups[0] = items[: starts[0]] + groups[0]
+        return _distribute_groups(groups, n)
+    if n > 1 and len(items) == n * 3:
+        return [items[i * 3 : (i + 1) * 3] for i in range(n)]
+    if n > 1 and len(items) == n * 2:
+        return [items[i * 2 : (i + 1) * 2] for i in range(n)]
+    if len(items) >= n * 2 and len(items) % 2 == 0 and len(items) % 3 != 0:
         pairs = list(zip(items[0::2], items[1::2]))
         base, extra = divmod(len(pairs), n)
         chunks: list[list[str]] = []
@@ -1024,6 +1083,79 @@ def _wide_slot(slots: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
+def expand_text_wells(slide) -> None:
+    """Grow filled body wells into unused space so long copy does not clip."""
+    frames: list[tuple[Any, dict[str, int], str]] = []
+    pics: list[dict[str, int]] = []
+    slide_h = int(11.25 * EMU_INCH)
+    try:
+        slide_h = int(slide.part.package.presentation_part.presentation.slide_height)
+    except Exception:
+        pass
+    for shape in slide.shapes:
+        box = _shape_box(shape)
+        if shape.shape_type in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}:
+            pics.append(box)
+            continue
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        text = (shape.text_frame.text or "").strip()
+        if not text or is_layout_chrome(text):
+            continue
+        frames.append((shape, box, text))
+    if not frames:
+        return
+    title_top = min(int(b["top"]) for _s, b, _t in frames)
+    ceiling = int(slide_h - 0.35 * EMU_INCH)
+    wide_pics = [p for p in pics if int(p["width"]) >= int(4.0 * EMU_INCH)]
+    if wide_pics:
+        banner = min(int(p["top"]) for p in wide_pics) - int(0.16 * EMU_INCH)
+        if banner > title_top + int(1.0 * EMU_INCH):
+            ceiling = min(ceiling, banner)
+    if ceiling <= 0:
+        return
+    for shape, box, text in frames:
+        if int(box["top"]) <= title_top + int(0.05 * EMU_INCH) and int(box["width"]) >= int(8.0 * EMU_INCH):
+            continue
+        if len(text.split()) <= 3 and int(box["height"]) <= int(0.7 * EMU_INCH):
+            continue
+        col_left = int(box["left"]) - int(0.35 * EMU_INCH)
+        col_right = int(box["left"]) + int(box["width"]) + int(0.35 * EMU_INCH)
+        next_top = ceiling
+        for _other, other_box, _ot in frames:
+            if _other is shape:
+                continue
+            other_cx = int(other_box["left"]) + int(other_box["width"]) / 2
+            if col_left <= other_cx <= col_right and int(other_box["top"]) > int(box["top"]) + int(0.2 * EMU_INCH):
+                next_top = min(next_top, int(other_box["top"]) - int(0.12 * EMU_INCH))
+        new_bottom = next_top
+        new_height = new_bottom - int(box["top"])
+        if new_height > int(box["height"]) + int(0.15 * EMU_INCH):
+            try:
+                shape.height = int(new_height)
+            except Exception:
+                continue
+
+
+def shrink_short_copy_wells(slide) -> None:
+    """Collapse a 2″ statement well when it only holds a short title."""
+    for shape in slide.shapes:
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        text = (shape.text_frame.text or "").strip()
+        if not text or is_layout_chrome(text):
+            continue
+        height = int(shape.height or 0)
+        if height < int(1.4 * EMU_INCH):
+            continue
+        if len(text.split()) > 10 or "\n" in text:
+            continue
+        try:
+            shape.height = int(0.90 * EMU_INCH)
+        except Exception:
+            continue
+
+
 def fill_text_slots(slide, title: str, subtitle: str, body_paras: list[str]) -> None:
     """Write source copy into content wells; keep layout chrome; drop leftover dummy."""
     slots = prototype_text_slots(slide)
@@ -1037,7 +1169,12 @@ def fill_text_slots(slide, title: str, subtitle: str, body_paras: list[str]) -> 
             delete_shape(title_slot["shape"])
             title_slot = None
     body_texts: list[str] = [
-        p for p in body_paras if p and p != (title or "").strip() and p != (subtitle or "").strip()
+        p
+        for p in body_paras
+        if p
+        and p != (title or "").strip()
+        and p != (subtitle or "").strip()
+        and not is_org_chrome(p)
     ]
     to_delete: list[Any] = []
     lead, body_texts = _peel_lead_in(body_texts)
@@ -1072,6 +1209,7 @@ def fill_text_slots(slide, title: str, subtitle: str, body_paras: list[str]) -> 
             delete_shape(shape)
         except Exception:
             continue
+    expand_text_wells(slide)
 
 
 def stack_copy_above_photos(slide, tokens: dict[str, Any]) -> None:
