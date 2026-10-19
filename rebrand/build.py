@@ -120,7 +120,14 @@ def fill_title(slide, placement: dict[str, Any], entry: dict[str, Any], tokens: 
     start = int(placement.get("font_pt") or (40 if kind == "cover_title" else 36 if kind == "section_title" else 28))
     box_w = int(shape.width)
     box_h = int(shape.height)
-    size = reduce_title_size(text, box_w, box_h, start)
+    size = reduce_title_size(
+        text,
+        box_w,
+        box_h,
+        start,
+        max_lines=2 if kind == "cover_title" else None,
+        fit_height=True,
+    )
     write_text_frame(
         shape.text_frame,
         [{"text": text, "level": 0, "alignment": "left" if kind != "cover_title" else "center", "runs": [{"text": text}]}],
@@ -567,7 +574,7 @@ def fill_prototype_slide(slide, entry: dict[str, Any], tokens: dict[str, Any], b
                 pictures.append(placement)
         else:
             rest_deferred.append(placement)
-    place_source_photos(slide, pictures, tokens, flags)
+    place_source_photos(slide, pictures, tokens, flags, role=entry.get("role"))
     place_icon_pictures(slide, icons, tokens)
     promote_text_into_empty_cards(slide, tokens)
     purge_rules_over_text(slide, tokens)
