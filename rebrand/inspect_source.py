@@ -179,6 +179,10 @@ def classify_source_slide(index: int, total: int, title: str, subtitle: str, sha
         dominating = [p for p in pictures if p.get("area_ratio", 0) > 0.5]
         if dominating and len(text_blocks) <= 2:
             return "PICTURE"
+        caption_only = len(body_text.split()) <= 16
+        large = [p for p in pictures if p.get("area_ratio", 0) > 0.28]
+        if large and caption_only and not tables and not charts:
+            return "PICTURE"
 
     spatial_blocks = [
         s
@@ -284,7 +288,8 @@ def inspect_source(source_path: Path, out_dir: Path) -> dict[str, Any]:
         )
 
     slide_count = max(1, len(slides))
-    repeated = {h for h, n in picture_hashes.items() if n / slide_count >= 0.60}
+    # Require the blob on several slides — a unique photo on a short deck is not a logo.
+    repeated = {h for h, n in picture_hashes.items() if n >= 3 and n / slide_count >= 0.60}
     for slide in slides:
         for shape in slide["shapes"]:
             digest = (shape.get("image") or {}).get("hash")

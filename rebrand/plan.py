@@ -425,6 +425,85 @@ def split_entries_for(entry: dict[str, Any], tokens: dict[str, Any]) -> list[dic
     return titled
 
 
+def _source_pictures(slide: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        shape
+        for shape in slide.get("shapes") or []
+        if shape.get("kind") == "picture" and not shape.get("drop_logo") and not shape.get("drop_footer")
+    ]
+
+
+def pick_prototype_layout(tokens: dict[str, Any], role: str, pictures: list[dict[str, Any]]) -> int:
+    """Prefer a sample slide whose photo wells match the source pictures."""
+    default = layout_index_for_role(tokens, role)
+    prototypes = tokens.get("prototypes") or []
+    if not prototypes:
+        return default
+    n_pics = len(pictures)
+    if not n_pics:
+        return default
+
+    src_w = max(1, int(tokens.get("_src_w") or tokens.get("slide_width") or 1))
+    src_h = max(1, int(tokens.get("_src_h") or tokens.get("slide_height") or 1))
+    tpl_w = max(1, int(tokens.get("slide_width") or 1))
+    tpl_h = max(1, int(tokens.get("slide_height") or 1))
+
+    def pic_center(shape: dict[str, Any]) -> tuple[float, float]:
+        b = shape.get("bounds") or {}
+        return (
+            (int(b.get("left") or 0) + int(b.get("width") or 0) / 2) / src_w,
+            (int(b.get("top") or 0) + int(b.get("height") or 0) / 2) / src_h,
+        )
+
+    src_centers = [pic_center(p) for p in pictures]
+    related = {
+        "TITLE": {"TITLE"},
+        "CLOSING": {"CLOSING"},
+        "SECTION": {"SECTION", "TITLE_BODY"},
+        "PICTURE": {"PICTURE", "TITLE_BODY"},
+        "TWO_CONTENT": {"TWO_CONTENT", "TITLE_BODY", "PICTURE"},
+        "TITLE_BODY": {"TITLE_BODY", "TWO_CONTENT", "PICTURE"},
+        "TITLE_ONLY": {"TITLE_ONLY", "TITLE_BODY", "PICTURE"},
+        "BLANK": {"BLANK", "TITLE_BODY", "PICTURE"},
+    }.get(role, {role})
+
+    scored: list[tuple[Any, ...]] = []
+    for proto in prototypes:
+        frames = proto.get("photo_frames") or []
+        n_frames = int(proto.get("photo_frame_count") or len(frames))
+        proto_role = proto.get("role")
+        if proto_role not in related and n_frames == 0:
+            continue
+        if n_pics and n_frames == 0 and proto_role not in {"TITLE", "CLOSING"}:
+            role_penalty = 80
+        else:
+            role_penalty = 0 if proto_role in related else 8
+        if proto_role == "PICTURE" and role != "PICTURE":
+            role_penalty += 12
+        if frames:
+            max_area = max(int(f.get("width") or 0) * int(f.get("height") or 0) for f in frames)
+            if max_area >= tpl_w * tpl_h * 0.7 and role != "PICTURE":
+                role_penalty += 20
+        count_gap = abs(n_frames - n_pics)
+        pos_gap = 0.0
+        if frames and src_centers:
+            for sx, sy in src_centers:
+                best = min(
+                    (
+                        ((sx - (int(f.get("left") or 0) + int(f.get("width") or 0) / 2) / tpl_w) ** 2)
+                        + ((sy - (int(f.get("top") or 0) + int(f.get("height") or 0) / 2) / tpl_h) ** 2)
+                    )
+                    for f in frames
+                )
+                pos_gap += best
+            pos_gap /= len(src_centers)
+        scored.append((role_penalty, count_gap, pos_gap, int(proto["index"])))
+    if not scored:
+        return default
+    scored.sort()
+    return int(scored[0][3])
+
+
 def apply_overrides(slides: list[dict[str, Any]], overrides: list[dict[str, Any]] | None) -> None:
     if not overrides:
         return
@@ -446,6 +525,8 @@ def build_plan(
     colorway: str | None = None,
 ) -> dict[str, Any]:
     tokens = apply_colorway(tokens, colorway or tokens.get("colorway"))
+    tokens["_src_w"] = int(manifest.get("slide_width") or tokens.get("slide_width") or 1)
+    tokens["_src_h"] = int(manifest.get("slide_height") or tokens.get("slide_height") or 1)
     slides = list(manifest.get("slides") or [])
     apply_overrides(slides, overrides)
     entries: list[dict[str, Any]] = []
@@ -457,7 +538,7 @@ def build_plan(
         if slide.get("_layout_override") is not None:
             layout_index = int(slide["_layout_override"])
         else:
-            layout_index = layout_index_for_role(tokens, role)
+            layout_index = pick_prototype_layout(tokens, role, _source_pictures(slide))
         layout = next((l for l in tokens.get("layouts") or [] if int(l["index"]) == layout_index), None)
         proto = next((p for p in tokens.get("prototypes") or [] if int(p["index"]) == layout_index), None)
         layout_name = (proto or layout or {}).get("name")

@@ -25,15 +25,18 @@ from helpers import (
     A_NS,
     P_NS,
     R_NS,
+    blob_hash,
     classify_layout_role,
+    clamp_box_to_slide,
     contain_fit,
     content_safe_box,
     delete_shape,
     enum_name,
     hex_color,
-    is_edge_logo,
+    is_brand_lockup,
     iter_shapes_abs,
     maybe_recompress,
+    overlap_fraction,
     placeholder_type,
     resolve_layout_map,
     theme_from_part_xml,
@@ -130,9 +133,82 @@ def _prototype_role(index: int, title: str, notes: str, total: int) -> str | Non
     return classify_layout_role(title, [])
 
 
+def _shape_box(shape) -> dict[str, int]:
+    return {
+        "left": int(getattr(shape, "left", 0) or 0),
+        "top": int(getattr(shape, "top", 0) or 0),
+        "width": int(getattr(shape, "width", 0) or 0),
+        "height": int(getattr(shape, "height", 0) or 0),
+    }
+
+
+def _picture_hash(shape) -> str | None:
+    try:
+        return blob_hash(shape.image.blob)
+    except Exception:
+        return None
+
+
+def prototype_picture_records(slide, slide_w: int, slide_h: int) -> list[dict[str, Any]]:
+    recs: list[dict[str, Any]] = []
+    slide_area = max(1, int(slide_w) * int(slide_h))
+    for shape in slide.shapes:
+        if shape.shape_type not in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}:
+            continue
+        box = _shape_box(shape)
+        area = max(0, box["width"] * box["height"])
+        recs.append(
+            {
+                **box,
+                "area": area,
+                "name": shape.name,
+                "hash": _picture_hash(shape),
+                "logo": is_brand_lockup(
+                    area, slide_area, box["left"], box["top"], box["width"], box["height"], slide_w, slide_h
+                ),
+                "placeholder": _is_picture_placeholder(shape),
+            }
+        )
+    return recs
+
+
+def prototype_content_box(slide, slide_w: int, slide_h: int, pictures: list[dict[str, Any]]) -> dict[str, int]:
+    """Text-column inset for a sample slide, clamped to the slide.
+
+    Full-height side photographs are photo wells, not the text margin.
+    """
+    boxes: list[dict[str, int]] = []
+    for shape in slide.shapes:
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            continue
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        text = (shape.text_frame.text or "").strip()
+        if not text:
+            continue
+        boxes.append(_shape_box(shape))
+    for rec in pictures:
+        if rec.get("logo"):
+            continue
+        if rec["height"] >= slide_h * 0.7 and rec["width"] >= slide_w * 0.3:
+            continue
+        boxes.append({k: rec[k] for k in ("left", "top", "width", "height")})
+    if not boxes:
+        side = int(slide_w * 0.05)
+        top = int(slide_h * 0.16)
+        return {"left": side, "top": top, "width": slide_w - 2 * side, "height": slide_h - top - int(slide_h * 0.08)}
+    left = min(int(b["left"]) for b in boxes)
+    top = min(int(b["top"]) for b in boxes)
+    right = max(int(b["left"]) + int(b["width"]) for b in boxes)
+    bottom = max(int(b["top"]) + int(b["height"]) for b in boxes)
+    return clamp_box_to_slide({"left": left, "top": top, "width": right - left, "height": bottom - top}, slide_w, slide_h)
+
+
 def discover_prototypes(prs) -> list[dict[str, Any]]:
     prototypes = []
     total = len(prs.slides)
+    slide_w = int(prs.slide_width)
+    slide_h = int(prs.slide_height)
     for index, slide in enumerate(prs.slides):
         notes = ""
         if slide.has_notes_slide:
@@ -152,12 +228,22 @@ def discover_prototypes(prs) -> list[dict[str, Any]]:
         role = _prototype_role(index, " ".join(texts[:3]), notes, total)
         if role is None:
             continue
+        pictures = prototype_picture_records(slide, slide_w, slide_h)
+        frames = [p for p in pictures if not p.get("logo")]
         prototypes.append(
             {
                 "index": index,
                 "name": name,
                 "role": role,
                 "notes": notes.split("\n")[0][:160],
+                "photo_frames": [
+                    {k: p[k] for k in ("left", "top", "width", "height", "hash") if k in p}
+                    for p in frames
+                ],
+                "photo_frame_count": len(frames),
+                "logo_hashes": [p["hash"] for p in pictures if p.get("logo") and p.get("hash")],
+                "sample_photo_hashes": [p["hash"] for p in frames if p.get("hash")],
+                "content_box": prototype_content_box(slide, slide_w, slide_h, pictures),
             }
         )
     return prototypes
@@ -800,7 +886,7 @@ def _is_picture_placeholder(shape) -> bool:
 
 
 def content_photo_frames(slide, slide_w: int, slide_h: int) -> list[dict[str, Any]]:
-    """Template content photo frames (not corner logos / master chrome)."""
+    """Template content photo frames (not the top-left brand lockup)."""
     recs: list[dict[str, Any]] = []
     slide_area = max(1, int(slide_w) * int(slide_h))
     for shape in slide.shapes:
@@ -819,20 +905,21 @@ def content_photo_frames(slide, slide_w: int, slide_h: int) -> list[dict[str, An
                 "width": width,
                 "height": height,
                 "area": area,
+                "hash": _picture_hash(shape),
                 "placeholder": _is_picture_placeholder(shape),
+                "logo": is_brand_lockup(area, slide_area, left, top, width, height, slide_w, slide_h),
             }
         )
     frames: list[dict[str, Any]] = []
     for rec in recs:
-        siblings = [other for other in recs if abs(other["area"] - rec["area"]) / max(rec["area"], 1) <= 0.08]
+        if rec["logo"]:
+            continue
+        siblings = [other for other in recs if not other["logo"] and abs(other["area"] - rec["area"]) / max(rec["area"], 1) <= 0.08]
         if len(siblings) >= 2:
             frames.append(rec)
             continue
-        logo = is_edge_logo(rec["area"], slide_area, rec["left"], rec["top"], rec["width"], rec["height"], slide_w, slide_h)
-        if logo:
-            continue
-        if rec["area"] >= slide_area * 0.05:
-            frames.append(rec)
+        # Any remaining non-logo picture is sample art / a photo well, including cover heroes.
+        frames.append(rec)
     frames.sort(
         key=lambda item: (
             0 if item["placeholder"] else 1,
@@ -844,6 +931,113 @@ def content_photo_frames(slide, slide_w: int, slide_h: int) -> list[dict[str, An
     return frames
 
 
+def _load_picture_blob(placement: dict[str, Any]) -> tuple[bytes, int | None, int | None] | None:
+    image = placement.get("image") or {}
+    path = image.get("path")
+    if not path or not Path(path).exists():
+        return None
+    blob = Path(path).read_bytes()
+    blob, _ext = maybe_recompress(blob, image.get("ext") or "png")
+    px = image.get("px") or [None, None]
+    img_w, img_h = px[0], px[1]
+    if not img_w or not img_h:
+        try:
+            from PIL import Image
+
+            with Image.open(io.BytesIO(blob)) as im:
+                img_w, img_h = im.size
+        except Exception:
+            img_w, img_h = None, None
+    return blob, img_w, img_h
+
+
+def _normalized_center(box: dict[str, Any], width: int, height: int) -> tuple[float, float]:
+    cx = (int(box.get("left") or 0) + int(box.get("width") or 0) / 2) / max(1, width)
+    cy = (int(box.get("top") or 0) + int(box.get("height") or 0) / 2) / max(1, height)
+    return cx, cy
+
+
+def _match_photo_frame(placement: dict[str, Any], frames: list[dict[str, Any]], tokens: dict[str, Any]) -> dict[str, Any] | None:
+    if not frames:
+        return None
+    src_w = max(1, int(tokens.get("_src_w") or tokens["slide_width"]))
+    src_h = max(1, int(tokens.get("_src_h") or tokens["slide_height"]))
+    slide_w = int(tokens["slide_width"])
+    slide_h = int(tokens["slide_height"])
+    bounds = placement.get("bounds") or {}
+    if not bounds:
+        return frames[0]
+    sx, sy = _normalized_center(bounds, src_w, src_h)
+
+    def score(frame: dict[str, Any]) -> tuple[float, int]:
+        fx, fy = _normalized_center(frame, slide_w, slide_h)
+        return ((sx - fx) ** 2 + (sy - fy) ** 2, -int(frame.get("area") or 0))
+
+    return min(frames, key=score)
+
+
+def _text_boxes(slide) -> list[dict[str, int]]:
+    boxes: list[dict[str, int]] = []
+    for shape in slide.shapes:
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            continue
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        if not (shape.text_frame.text or "").strip():
+            continue
+        boxes.append(_shape_box(shape))
+    return boxes
+
+
+def _free_photo_box(slide, tokens: dict[str, Any], img_w: int | None, img_h: int | None) -> dict[str, int]:
+    """A photo well that does not sit on top of prototype copy."""
+    slide_w = int(tokens["slide_width"])
+    slide_h = int(tokens["slide_height"])
+    safe = content_safe_box(tokens, tokens.get("_layout_index"))
+    texts = _text_boxes(slide)
+    candidates = [
+        {"left": int(slide_w * 0.50), "top": 0, "width": int(slide_w * 0.50), "height": slide_h},
+        {"left": safe["left"], "top": int(slide_h * 0.68), "width": safe["width"], "height": int(slide_h * 0.28)},
+        {
+            "left": int(safe["left"] + safe["width"] * 0.55),
+            "top": int(safe["top"] + safe["height"] * 0.15),
+            "width": int(safe["width"] * 0.45),
+            "height": int(safe["height"] * 0.80),
+        },
+    ]
+    for cand in candidates:
+        box = clamp_box_to_slide(cand, slide_w, slide_h)
+        if all(overlap_fraction(box, text) < 0.20 for text in texts):
+            return box
+    # Last resort: modest lower-right card, not the full content-safe area.
+    return clamp_box_to_slide(
+        {
+            "left": int(slide_w * 0.62),
+            "top": int(slide_h * 0.55),
+            "width": int(slide_w * 0.32),
+            "height": int(slide_h * 0.38),
+        },
+        slide_w,
+        slide_h,
+    )
+
+
+def purge_sample_photos(slide, tokens: dict[str, Any]) -> None:
+    """Drop leftover template sample photographs (never the brand lockup)."""
+    sample = set(tokens.get("sample_photo_hashes") or [])
+    logos = set(tokens.get("logo_hashes") or [])
+    if not sample and not logos:
+        return
+    for shape in list(slide.shapes):
+        if shape.shape_type not in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}:
+            continue
+        digest = _picture_hash(shape)
+        if digest and digest in logos:
+            continue
+        if digest and digest in sample:
+            delete_shape(shape)
+
+
 def place_source_photos(
     slide,
     placements: list[dict[str, Any]],
@@ -853,45 +1047,40 @@ def place_source_photos(
     """Delete template content frames and add_picture new unlocked pics at that geometry."""
     sources: list[dict[str, Any]] = []
     for placement in placements:
-        image = placement.get("image") or {}
-        path = image.get("path")
-        if path and Path(path).exists():
+        if _load_picture_blob(placement) is not None:
             sources.append(placement)
     slide_w = int(tokens["slide_width"])
     slide_h = int(tokens["slide_height"])
     frames = content_photo_frames(slide, slide_w, slide_h)
-    used: set[int] = set()
-    for index, placement in enumerate(sources):
-        image = placement.get("image") or {}
-        blob = Path(image["path"]).read_bytes()
-        blob, _ext = maybe_recompress(blob, image.get("ext") or "png")
-        px = image.get("px") or [None, None]
-        img_w, img_h = px[0], px[1]
-        if not img_w or not img_h:
-            try:
-                from PIL import Image
-
-                with Image.open(io.BytesIO(blob)) as im:
-                    img_w, img_h = im.size
-            except Exception:
-                img_w, img_h = None, None
-        if index < len(frames):
-            frame = frames[index]
-            box = {"left": frame["left"], "top": frame["top"], "width": frame["width"], "height": frame["height"]}
-            delete_shape(frame["shape"])
-            add_unlocked_picture(slide, blob, box, img_w, img_h)
-            used.add(index)
+    used_ids: set[int] = set()
+    for placement in sources:
+        loaded = _load_picture_blob(placement)
+        if loaded is None:
             continue
-        add_unlocked_picture(slide, blob, content_safe_box(tokens, tokens.get("_layout_index")), img_w, img_h)
+        blob, img_w, img_h = loaded
+        remaining = [frame for frame in frames if id(frame["shape"]) not in used_ids]
+        frame = _match_photo_frame(placement, remaining, tokens)
+        if frame is not None:
+            box = clamp_box_to_slide(
+                {"left": frame["left"], "top": frame["top"], "width": frame["width"], "height": frame["height"]},
+                slide_w,
+                slide_h,
+            )
+            delete_shape(frame["shape"])
+            used_ids.add(id(frame["shape"]))
+            add_unlocked_picture(slide, blob, box, img_w, img_h)
+            continue
+        add_unlocked_picture(slide, blob, _free_photo_box(slide, tokens, img_w, img_h), img_w, img_h)
         flags.append("PICTURE_OVERFLOW")
     # Always drop leftover sample art, including slides with no source photos.
-    for index, frame in enumerate(frames):
-        if index in used:
+    for frame in frames:
+        if id(frame["shape"]) in used_ids:
             continue
         try:
             delete_shape(frame["shape"])
         except Exception:
             continue
+    purge_sample_photos(slide, tokens)
 
 
 def replace_largest_picture(slide, image_path: str, slide_w: int, slide_h: int) -> bool:

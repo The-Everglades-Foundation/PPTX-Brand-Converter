@@ -24,6 +24,7 @@ from helpers import (  # noqa: E402
     A_NS,
     allowed_colors,
     allowed_fonts,
+    blob_hash,
     content_safe_box,
     dump_json,
     estimate_lines,
@@ -245,7 +246,7 @@ def table_parity(manifest: dict[str, Any], out_prs) -> list[str]:
     return diffs
 
 
-def image_parity(manifest: dict[str, Any], out_prs) -> tuple[int, int, list[str]]:
+def image_parity(manifest: dict[str, Any], out_prs, tokens: dict[str, Any] | None = None) -> tuple[int, int, list[str]]:
     src = 0
     dropped = []
     for slide in manifest.get("slides") or []:
@@ -256,11 +257,20 @@ def image_parity(manifest: dict[str, Any], out_prs) -> tuple[int, int, list[str]
                 dropped.append(f"slide {slide['index'] + 1} {shape.get('name')}")
             else:
                 src += 1
+    logos = set((tokens or {}).get("logo_hashes") or [])
     out = 0
     for slide in out_prs.slides:
         for shape in slide.shapes:
-            if "PICTURE" in str(shape.shape_type):
-                out += 1
+            if "PICTURE" not in str(shape.shape_type):
+                continue
+            digest = None
+            try:
+                digest = blob_hash(shape.image.blob)
+            except Exception:
+                digest = None
+            if digest and digest in logos:
+                continue
+            out += 1
     return src, out, dropped
 
 
@@ -335,7 +345,7 @@ def run_qa(out_dir: Path, source_path: Path, output_path: Path) -> dict[str, Any
                 diffs.append({"source_index": index, "source": a[:240], "output": b[:240]})
         checks["text_parity"] = {"pass": not diffs, "diffs": diffs}
 
-        src_n, out_n, dropped = image_parity(manifest, out_prs)
+        src_n, out_n, dropped = image_parity(manifest, out_prs, tokens)
         checks["image_parity"] = {
             "pass": src_n == out_n,
             "source": src_n,

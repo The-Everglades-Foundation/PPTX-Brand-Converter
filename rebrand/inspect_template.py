@@ -152,6 +152,20 @@ def inspect_template(
     height = int(prs.slide_height)
     aspect = "16:9" if abs((width / height) - (16 / 9)) < 0.08 else ("4:3" if abs((width / height) - (4 / 3)) < 0.08 else round(width / height, 4))
     prototypes = discover_prototypes(prs)
+    logo_hashes = sorted({h for p in prototypes for h in (p.get("logo_hashes") or []) if h})
+    sample_photo_hashes = sorted({h for p in prototypes for h in (p.get("sample_photo_hashes") or []) if h})
+    inset_lefts = [int(p["content_box"]["left"]) for p in prototypes if p.get("content_box")]
+    inset_tops = [int(p["content_box"]["top"]) for p in prototypes if p.get("content_box")]
+    content_inset = {}
+    if inset_lefts:
+        inset_lefts.sort()
+        inset_tops.sort()
+        content_inset = {
+            "left": inset_lefts[len(inset_lefts) // 2],
+            "top": inset_tops[len(inset_tops) // 2] if inset_tops else int(height * 0.16),
+            "right": inset_lefts[len(inset_lefts) // 2],
+            "bottom": int(height * 0.08),
+        }
     named_layouts = [
         item
         for item in layouts
@@ -187,6 +201,9 @@ def inspect_template(
         "master_chrome": chrome,
         "layouts": layouts,
         "prototypes": prototypes,
+        "logo_hashes": logo_hashes,
+        "sample_photo_hashes": sample_photo_hashes,
+        "content_inset": content_inset,
         "layout_map": colorways[0]["layout_map"] if colorways else layout_map,
         "theme": colorways[0]["theme"] if colorways else as_designed,
         "xml_theme": theme,
