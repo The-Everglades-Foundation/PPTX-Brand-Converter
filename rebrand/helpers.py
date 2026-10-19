@@ -626,12 +626,84 @@ def fill_cell(cell, hex_value: str) -> None:
     cell.fill.fore_color.rgb = rgb(hex_value)
 
 
+def as_box(left: int, top: int, width: int, height: int) -> dict[str, int]:
+    return {"left": int(left), "top": int(top), "width": max(1, int(width)), "height": max(1, int(height))}
+
+
+def box_right(box: dict[str, int]) -> int:
+    return int(box["left"]) + int(box["width"])
+
+
+def box_bottom(box: dict[str, int]) -> int:
+    return int(box["top"]) + int(box["height"])
+
+
+def intersect_box(a: dict[str, int], b: dict[str, int]) -> dict[str, int] | None:
+    left = max(int(a["left"]), int(b["left"]))
+    top = max(int(a["top"]), int(b["top"]))
+    right = min(box_right(a), box_right(b))
+    bottom = min(box_bottom(a), box_bottom(b))
+    if right <= left or bottom <= top:
+        return None
+    return as_box(left, top, right - left, bottom - top)
+
+
+def overlap_fraction(a: dict[str, int], b: dict[str, int]) -> float:
+    inter = intersect_box(a, b)
+    if inter is None:
+        return 0.0
+    area_a = max(1, int(a["width"]) * int(a["height"]))
+    return (int(inter["width"]) * int(inter["height"])) / area_a
+
+
+def clamp_box_to_slide(box: dict[str, int], slide_w: int, slide_h: int) -> dict[str, int]:
+    slide = as_box(0, 0, int(slide_w), int(slide_h))
+    clipped = intersect_box(box, slide)
+    return clipped or as_box(0, 0, 1, 1)
+
+
+def is_brand_lockup(
+    area: int,
+    slide_area: int,
+    left: int,
+    top: int,
+    width: int,
+    height: int,
+    slide_w: int,
+    slide_h: int,
+) -> bool:
+    """Small top-left (or edge) brand mark — not a content photo frame."""
+    if area > slide_area * 0.05:
+        return False
+    if left <= slide_w * 0.25 and top <= slide_h * 0.30:
+        return True
+    return is_edge_logo(area, slide_area, left, top, width, height, slide_w, slide_h)
+
+
+def _prototype_record(tokens: dict[str, Any], layout_index: int | None) -> dict[str, Any] | None:
+    if layout_index is None:
+        return None
+    for proto in tokens.get("prototypes") or []:
+        try:
+            if int(proto.get("index")) == int(layout_index):
+                return proto
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def content_safe_box(tokens: dict[str, Any], layout_index: int | None = None) -> dict[str, int]:
     width = int(tokens["slide_width"])
     height = int(tokens["slide_height"])
-    side = int(width * 0.05)
-    top = int(height * 0.16)
-    bottom = int(height * 0.08)
+    proto = _prototype_record(tokens, layout_index)
+    if proto and proto.get("content_box"):
+        box = {k: int(proto["content_box"][k]) for k in ("left", "top", "width", "height")}
+        return _shrink_for_chrome(clamp_box_to_slide(box, width, height), tokens)
+    inset = tokens.get("content_inset") or {}
+    side = int(inset.get("left") or width * 0.05)
+    top = int(inset.get("top") or height * 0.16)
+    bottom_margin = int(inset.get("bottom") or height * 0.08)
+    right_margin = int(inset.get("right") or side)
     layouts = tokens.get("layouts") or []
     layout = None
     if layout_index is not None and 0 <= layout_index < len(layouts):
@@ -659,9 +731,9 @@ def content_safe_box(tokens: dict[str, Any], layout_index: int | None = None) ->
                 "width": max(rights) - min(lefts),
                 "height": max(bottoms) - min(tops),
             }
-            return _shrink_for_chrome(box, tokens)
-    box = {"left": side, "top": top, "width": width - 2 * side, "height": height - top - bottom}
-    return _shrink_for_chrome(box, tokens)
+            return _shrink_for_chrome(clamp_box_to_slide(box, width, height), tokens)
+    box = {"left": side, "top": top, "width": width - side - right_margin, "height": height - top - bottom_margin}
+    return _shrink_for_chrome(clamp_box_to_slide(box, width, height), tokens)
 
 
 def _shrink_for_chrome(box: dict[str, int], tokens: dict[str, Any]) -> dict[str, int]:
