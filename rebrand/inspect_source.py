@@ -17,24 +17,30 @@ sys.path.insert(0, str(ROOT))
 from helpers import (  # noqa: E402
     blob_hash,
     chart_is_external,
+    compact_text,
     concatenated_text,
     extract_chart,
     extract_sections,
     extract_smartart_text,
     extract_table,
     has_timing,
+    is_all_caps_heading,
     is_decorative_icon,
     is_edge_logo,
     is_footer_shape,
     is_line_or_arrow,
+    is_layout_label,
     is_org_chrome,
+    is_title_like,
     iter_shapes_abs,
+    looks_like_photo_caption,
     paragraphs_from_shape,
     picture_crop,
     placeholder_idx,
     placeholder_type_name,
     shape_kind,
     slide_hidden,
+    title_candidate_score,
 )
 
 TITLE_TYPE_NAMES = {"TITLE", "CENTER_TITLE", "VERTICAL_TITLE"}
@@ -158,11 +164,13 @@ def classify_source_slide(index: int, total: int, title: str, subtitle: str, sha
     # Title + subtitle only, or first-slide cover
     if title and subtitle and not body_text and not tables and not charts and not photos:
         return "TITLE"
-    # Cover: first slide, no tables/charts, no dominating photograph.
-    # Side-by-side title/subtitle/tagline boxes (PptxGenJS) are not TWO_CONTENT.
+    # Cover: first slide with a real title stays TITLE even when a banner/hero
+    # photo is present. Side-by-side title boxes (PptxGenJS) are not TWO_CONTENT.
     if index == 0 and not tables and not charts:
         dominating = [p for p in photos if (p.get("area_ratio") or 0) > 0.5]
         if not dominating:
+            return "TITLE"
+        if title and is_title_like(title) and not looks_like_photo_caption(title) and not body_text:
             return "TITLE"
     if (
         index == 0
@@ -185,6 +193,11 @@ def classify_source_slide(index: int, total: int, title: str, subtitle: str, sha
         return "CLOSING"
 
     if photos:
+        # ALL-CAPS / short titles are titles, not captions. "Marsh survey site"
+        # stays PICTURE so full-bleed caption wells still win for photo labels.
+        if title and not body_text and not tables and not charts:
+            if is_title_like(title) and not looks_like_photo_caption(title):
+                return "TITLE_BODY"
         dominating = [p for p in photos if p.get("area_ratio", 0) > 0.5]
         if dominating and len(text_blocks) <= 2:
             return "PICTURE"
@@ -247,9 +260,32 @@ def _is_org_chrome(text: str) -> bool:
 
 def _title_ready(shape: dict[str, Any]) -> str:
     text = (shape.get("text") or "").strip()
-    if not text or shape.get("drop_footer") or _is_org_chrome(text):
+    if not text or shape.get("drop_footer") or _is_org_chrome(text) or is_layout_label(text):
         return ""
     return text
+
+
+def _title_candidates(shapes: list[dict[str, Any]]) -> list[tuple[int, int, int, str]]:
+    """Score shape text and short ALL-CAPS paragraphs as possible titles."""
+    found: list[tuple[int, int, int, str]] = []
+    seen: set[str] = set()
+    for shape in shapes:
+        if shape.get("kind") != "text" and not _title_ready(shape):
+            continue
+        top = int((shape.get("bounds") or {}).get("top") or 0)
+        left = int((shape.get("bounds") or {}).get("left") or 0)
+        whole = compact_text(_title_ready(shape))
+        paras = [compact_text(p.get("text") or "") for p in ((shape.get("text_frame") or {}).get("paragraphs") or [])]
+        options = [whole] if whole else []
+        for line in paras:
+            if line and (is_all_caps_heading(line) or is_title_like(line)) and line not in options:
+                options.append(line)
+        for text in options:
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            found.append((title_candidate_score(text), top, left, text))
+    return found
 
 
 def pick_title(shapes: list[dict[str, Any]]) -> tuple[str, str]:
@@ -270,29 +306,25 @@ def pick_title(shapes: list[dict[str, Any]]) -> tuple[str, str]:
         if named:
             title = named[0]["text"].strip()
     if not title:
-        texts = [s for s in shapes if s.get("kind") == "text" and _title_ready(s)]
-        texts.sort(key=lambda s: (int(s["bounds"]["top"]), int(s["bounds"]["left"])))
-        shorts = [s for s in texts if len((s.get("text") or "").split()) <= 16]
-        if shorts:
-            title = shorts[0]["text"].strip()
-            title_top = int((shorts[0].get("bounds") or {}).get("top") or 0)
+        ranked = _title_candidates(shapes)
+        ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
+        usable = [item for item in ranked if item[0] >= 8]
+        if usable:
+            title = usable[0][3]
+            title_top = usable[0][1]
             if not subtitle:
-                for extra in shorts[1:]:
-                    second = extra["text"].strip()
-                    words = second.split()
-                    extra_top = int((extra.get("bounds") or {}).get("top") or 0)
-                    if second == title:
+                for score, extra_top, _left, second in usable[1:]:
+                    if second == title or score < 8:
                         continue
                     if extra_top > title_top + int(1.2 * 914400):
                         continue
+                    words = second.split()
                     if len(words) > 8 or any(ch in second for ch in ".!?—"):
+                        continue
+                    if is_all_caps_heading(title) and is_all_caps_heading(second):
                         continue
                     subtitle = second
                     break
-        elif texts:
-            candidate = texts[0]["text"].strip()
-            if len(candidate.split()) <= 16:
-                title = candidate
     if subtitle and _is_org_chrome(subtitle):
         subtitle = ""
     if title and _is_org_chrome(title):
@@ -302,10 +334,10 @@ def pick_title(shapes: list[dict[str, Any]]) -> tuple[str, str]:
             if shape.get("drop_footer"):
                 continue
             for para in ((shape.get("text_frame") or {}).get("paragraphs") or []):
-                line = (para.get("text") or "").strip()
+                line = compact_text(para.get("text") or "")
                 if not line or _is_org_chrome(line):
                     continue
-                if 1 <= len(line.split()) <= 8:
+                if is_title_like(line):
                     title = line
                     break
             if title:
@@ -329,7 +361,7 @@ def inspect_source(source_path: Path, out_dir: Path) -> dict[str, Any]:
         for shape, left, top in iter_shapes_abs(slide.shapes):
             rec = inspect_shape(shape, left, top, slide_w, slide_h, media_dir, index, pic_n)
             rec["drop_icon"] = rec.get("kind") == "picture" and is_decorative_icon(rec)
-            if _is_org_chrome(rec.get("text") or ""):
+            if _is_org_chrome(rec.get("text") or "") or is_layout_label(rec.get("text") or ""):
                 rec["drop_footer"] = True
             if rec.get("kind") == "picture":
                 pic_n += 1
