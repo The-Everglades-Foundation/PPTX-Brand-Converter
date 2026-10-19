@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 from helpers import (  # noqa: E402
     content_safe_box,
+    data_content_box,
     dump_json,
     fits,
     is_decorative_icon,
@@ -24,7 +25,7 @@ from helpers import (  # noqa: E402
     reduce_body_size,
     reduce_title_size,
 )
-from colorways import apply_colorway  # noqa: E402
+from colorways import apply_colorway, is_short_caption  # noqa: E402
 
 
 def _ph_type_name(ph: dict[str, Any]) -> str:
@@ -137,11 +138,10 @@ def table_row_chunks(table: dict[str, Any], safe: dict[str, int], font_pt: int =
         return []
     header = rows[0]
     body = rows[1:] if len(rows) > 1 else []
-    min_row = int(0.28 * 914400)
+    min_row = int(0.32 * 914400)
     available = max(min_row, int(safe.get("height") or min_row))
-    # header + body rows
-    per = max(min_row, int(available / max(2, min(len(rows), 8))))
-    capacity = max(1, available // per - 1)
+    # header occupies one row; remaining height is body rows that actually fit.
+    capacity = max(1, available // min_row - 1)
     if not body:
         return [{"header": header, "rows": [], "font_pt": font_pt, "cont": False}]
     chunks = []
@@ -409,9 +409,12 @@ def split_entries_for(entry: dict[str, Any], tokens: dict[str, Any]) -> list[dic
     table_pls = [p for p in entry["placements"] if p["kind"] == "table"]
     new_tables = []
     kept_tables = []
+    table_well = data_content_box(tokens, layout_index)
+    table_safe = dict(table_well)
+    table_safe["height"] = max(int(0.28 * 914400), int(table_well["height"]) - int(0.55 * 914400))
     for table_pl in table_pls:
         table = table_pl.get("table") or {}
-        chunks = table_row_chunks(table, safe)
+        chunks = table_row_chunks(table, table_safe)
         if len(chunks) <= 1:
             if chunks:
                 table_pl["table_chunk"] = chunks[0]
@@ -603,14 +606,25 @@ def _body_point_count(slide: dict[str, Any] | None) -> int:
 
 def _entry_has_competing_body(entry: dict[str, Any]) -> bool:
     """True when body copy would fight a table/chart for the same well."""
+    blobs: list[str] = []
+    para_count = 0
     for placement in entry.get("placements") or []:
         if placement.get("kind") not in {"body", "textbox", "caption", "subtitle"}:
             continue
         paras = placement.get("paragraphs") or []
         text = " ".join((p.get("text") or "") for p in paras) or str(placement.get("text") or "")
-        if len(text.split()) >= 8:
-            return True
-    return False
+        if not (text or "").strip():
+            continue
+        blobs.append(text)
+        filled = [p for p in paras if (p.get("text") or "").strip()]
+        para_count += max(1, len(filled))
+    if len(blobs) >= 2 or para_count > 2:
+        return True
+    if not blobs:
+        return False
+    if is_short_caption(blobs[0]):
+        return False
+    return len(blobs[0].split()) >= 8
 
 
 def _content_slot_count(slide: dict[str, Any] | None) -> int:
@@ -717,7 +731,7 @@ def pick_prototype_layout(
     if role == "SECTION":
         return prototype_index_matching(tokens, "section divider") or default
 
-    if n_tables and cols <= 1 and n_pics == 0 and role == "TITLE_ONLY":
+    if n_tables and n_pics == 0 and n_charts == 0 and slots < 3 and cols < 3:
         found = prototype_index_matching(tokens, "data table", "comparison")
         if found is not None:
             return found

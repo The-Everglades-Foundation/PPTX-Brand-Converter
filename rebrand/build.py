@@ -25,6 +25,7 @@ from colorways import (  # noqa: E402
     patch_theme_part,
     place_icon_pictures,
     place_source_photos,
+    prepare_table_caption_wells,
     promote_text_into_empty_cards,
     purge_empty_table_chrome,
     purge_rules_over_text,
@@ -46,6 +47,7 @@ from helpers import (  # noqa: E402
     contain_fit,
     content_safe_box,
     crop_cut_fraction,
+    data_content_box,
     delete_all_slides,
     delete_slide,
     delete_shape,
@@ -274,6 +276,7 @@ def _data_box(slide, tokens: dict[str, Any], min_height: int, kind: str = "table
     slide_w = int(tokens["slide_width"])
     slide_h = int(tokens["slide_height"])
     safe = content_safe_box(tokens, tokens.get("_layout_index"))
+    well = data_content_box(tokens, tokens.get("_layout_index"))
     texts = _occupied_text_boxes(slide)
     top = int(safe["top"])
     for box in texts:
@@ -313,6 +316,20 @@ def _data_box(slide, tokens: dict[str, Any], min_height: int, kind: str = "table
                 slide_w,
                 slide_h,
             )
+        # Table is the slide: fill the well under the title/caption, not a leftover
+        # Comparison banner strip at the floor.
+        top = int(well["top"])
+        for box in texts:
+            if int(box["height"]) > int(1.5 * 914400):
+                continue
+            if box["top"] < int(slide_h * 0.42):
+                top = max(top, int(box["top"] + box["height"] + gap))
+        floor = int(slide_h - 0.32 * 914400)
+        return clamp_box_to_slide(
+            as_box(int(well["left"]), top, int(well["width"]), max(int(1.2 * 914400), floor - top)),
+            slide_w,
+            slide_h,
+        )
     body_texts = [b for b in texts if b["top"] >= int(slide_h * 0.28)]
     if body_texts and any(overlap_fraction(body, b) > 0.12 for b in body_texts):
         lowest = max(box_bottom(b) for b in texts)
@@ -557,6 +574,8 @@ def fill_prototype_slide(slide, entry: dict[str, Any], tokens: dict[str, Any], b
     collapse_overlapping_text(slide)
     if any(p.get("kind") in {"table", "chart"} for p in rest_deferred):
         shrink_short_copy_wells(slide)
+        if any(p.get("kind") == "table" for p in rest_deferred):
+            prepare_table_caption_wells(slide, tokens)
         purge_empty_table_chrome(slide, tokens)
     rest_deferred.sort(
         key=lambda p: 0 if p.get("kind") == "chart" else 1 if p.get("kind") == "table" else 2

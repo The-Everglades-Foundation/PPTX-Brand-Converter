@@ -20,6 +20,7 @@ from typing import Any
 from lxml import etree
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.oxml.ns import qn
+from pptx.util import Pt
 
 from helpers import (
     A_NS,
@@ -43,6 +44,8 @@ from helpers import (
     overlap_fraction,
     placeholder_type,
     resolve_layout_map,
+    rgb,
+    theme_color,
     theme_from_part_xml,
 )
 
@@ -805,6 +808,17 @@ def prototype_text_slots(slide) -> list[dict[str, Any]]:
     return slots
 
 
+def is_short_caption(text: str) -> bool:
+    """True for a one- or two-line table caption, not competing body copy."""
+    t = (text or "").strip()
+    if not t or is_layout_chrome(t):
+        return False
+    lines = [ln for ln in t.splitlines() if ln.strip()]
+    if len(lines) > 2:
+        return False
+    return 1 <= len(t.split()) <= 40
+
+
 def is_layout_chrome(text: str) -> bool:
     """True for brand lockup labels / index badges that must stay on the sample slide."""
     t = (text or "").strip()
@@ -1119,6 +1133,8 @@ def expand_text_wells(slide) -> None:
             continue
         if len(text.split()) <= 3 and int(box["height"]) <= int(0.7 * EMU_INCH):
             continue
+        if is_short_caption(text) and int(box["width"]) >= int(12.0 * EMU_INCH):
+            continue
         col_left = int(box["left"]) - int(0.35 * EMU_INCH)
         col_right = int(box["left"]) + int(box["width"]) + int(0.35 * EMU_INCH)
         next_top = ceiling
@@ -1135,6 +1151,129 @@ def expand_text_wells(slide) -> None:
                 shape.height = int(new_height)
             except Exception:
                 continue
+
+
+def _looks_like_comparison_grid(slots: list[dict[str, Any]]) -> bool:
+    """Comparison sample art is a dense row/column dummy grid, not two cards."""
+    if len(slots) < 8:
+        return False
+    heights = [int(s.get("height") or 0) for s in slots]
+    median_h = sorted(heights)[len(heights) // 2]
+    similar = sum(1 for h in heights if abs(h - median_h) <= int(0.35 * EMU_INCH))
+    return similar >= 6
+
+
+def _fill_caption_on_grid(slots: list[dict[str, Any]], texts: list[str]) -> list[Any]:
+    """Place a short caption under the title; do not merge dummy table cells."""
+    to_delete: list[Any] = []
+    if not slots:
+        return to_delete
+    slots = sorted(slots, key=lambda s: (int(s["top"]), int(s["left"])))
+    primary = slots[0]
+    left = min(int(s["left"]) for s in slots)
+    top = min(int(s["top"]) for s in slots)
+    right = max(int(s["left"]) + int(s["width"]) for s in slots)
+    cap_h = int(0.55 * EMU_INCH)
+    if texts and len(" ".join(texts).split()) > 18:
+        cap_h = int(0.78 * EMU_INCH)
+    try:
+        primary["shape"].left = int(left)
+        primary["shape"].top = int(top)
+        primary["shape"].width = max(int(1.0 * EMU_INCH), int(right - left))
+        primary["shape"].height = int(cap_h)
+    except Exception:
+        pass
+    if texts:
+        replace_shape_text(primary["shape"], "\n".join(texts))
+        try:
+            primary["shape"].fill.background()
+        except Exception:
+            pass
+    else:
+        clear_shape_text(primary["shape"])
+        to_delete.append(primary["shape"])
+    for extra in slots[1:]:
+        clear_shape_text(extra["shape"])
+        to_delete.append(extra["shape"])
+    return to_delete
+
+
+def _recolor_text_shape(shape, color_hex: str, size_pt: float | None = None) -> None:
+    if not getattr(shape, "has_text_frame", False):
+        return
+    for para in shape.text_frame.paragraphs:
+        if not para.runs:
+            run = para.add_run()
+            run.text = para.text or ""
+        for run in para.runs:
+            try:
+                run.font.color.rgb = rgb(color_hex)
+            except Exception:
+                pass
+            if size_pt:
+                try:
+                    run.font.size = Pt(size_pt)
+                except Exception:
+                    pass
+
+
+def prepare_table_caption_wells(slide, tokens: dict[str, Any]) -> None:
+    """Short table captions sit under the title in dark ink, not a white overlay well."""
+    slide_w = int(tokens["slide_width"])
+    slide_h = int(tokens["slide_height"])
+    safe = content_safe_box(tokens, tokens.get("_layout_index"))
+    titles: list[tuple[Any, dict[str, int]]] = []
+    captions: list[tuple[Any, dict[str, int], str]] = []
+    other = False
+    for shape in slide.shapes:
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            continue
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        text = (shape.text_frame.text or "").strip()
+        if not text:
+            continue
+        box = _shape_box(shape)
+        if is_layout_chrome(text):
+            titles.append((shape, box))
+            continue
+        if box["top"] < slide_h * 0.28 and box["width"] >= slide_w * 0.45 and box["height"] <= int(1.4 * EMU_INCH):
+            titles.append((shape, box))
+            continue
+        if is_short_caption(text):
+            captions.append((shape, box, text))
+        else:
+            other = True
+    if other or not captions:
+        return
+    title_bottom = int(safe["top"])
+    for _shape, box in titles:
+        title_bottom = max(title_bottom, int(box["top"]) + int(box["height"]))
+    gap = int(0.12 * EMU_INCH)
+    y = title_bottom + gap
+    words = max(len(t.split()) for _s, _b, t in captions)
+    cap_h = int(0.78 * EMU_INCH) if words > 18 else int(0.52 * EMU_INCH)
+    ink = theme_color(tokens, "dk2", "3B3159")
+    if hex_color(ink) in {"FFFFFF", "FDFDFD", "F1F3E4"}:
+        ink = "3B3159"
+    kept = captions[0][0]
+    try:
+        kept.left = int(safe["left"])
+        kept.top = int(y)
+        kept.width = int(safe["width"])
+        kept.height = int(cap_h)
+    except Exception:
+        pass
+    try:
+        kept.fill.background()
+    except Exception:
+        pass
+    _recolor_text_shape(kept, ink, size_pt=16)
+    for shape, _box, _text in captions[1:]:
+        try:
+            delete_shape(shape)
+        except Exception:
+            continue
 
 
 def shrink_short_copy_wells(slide) -> None:
@@ -1196,6 +1335,10 @@ def fill_text_slots(slide, title: str, subtitle: str, body_paras: list[str]) -> 
         for i, col in enumerate(columns):
             chunk = chunks[i] if i < len(chunks) else []
             to_delete.extend(_fill_column(col, chunk))
+    elif _looks_like_comparison_grid(content) and (
+        not body_texts or (len(body_texts) == 1 and is_short_caption(body_texts[0]))
+    ):
+        to_delete.extend(_fill_caption_on_grid(content, body_texts))
     else:
         to_delete.extend(_fill_column(content, body_texts))
     for shape in list(slide.shapes):
