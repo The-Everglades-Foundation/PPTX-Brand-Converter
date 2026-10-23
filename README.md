@@ -20,7 +20,7 @@ Dev server: `http://127.0.0.1:4321`
 
 Optional staff password: copy `.env.example` to `.env` and set `INTERNAL_PASSWORD`.
 
-Place the official template at `templates/everglades.pptx`. The file in this repo is **Claude Slide Template 2026**. If you only have a `.potx`, the engine rewrites it to `.pptx` on inspect. The deck draws each sample layout in both palette colors — **Green** is `7FAE29`, **Blue** is `04B1D2`. Staff pick one; convert clones that colorway across the rebuilt deck.
+Place the official template at `templates/everglades.pptx`. The file in this repo is **Claude Slide Template 2026**. If you only have a `.potx`, the engine rewrites it to `.pptx` on inspect. Convert clones that deck’s sample slides.
 
 ## Commands
 

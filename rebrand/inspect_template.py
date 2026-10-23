@@ -238,25 +238,13 @@ def inspect_template(
     }
     if prototypes:
         if colorways and (colorways[0].get("source") == "accent_pairs"):
-            labels = ", ".join(
-                f"{c.get('label') or c.get('id')} {c.get('description') or ''}".strip()
-                for c in colorways
-            )
             tokens["notes"].append(
-                f"Template uses {len(prototypes)} designed sample slides in paired colorways "
-                f"({labels}). Convert clones the series you pick."
+                f"Template uses {len(prototypes)} designed sample slides. Convert clones that series."
             )
         elif colorways:
-            labels = ", ".join(
-                f"{c.get('label') or c.get('id')} ({(c.get('description') or '').strip()})"
-                if c.get("description")
-                else (c.get("label") or c.get("id"))
-                for c in colorways
-            )
             tokens["notes"].append(
                 f"Official template uses {len(prototypes)} sample-slide layouts. "
-                f"Palette includes both Sawgrass Lime and Water Teal; staff pick one "
-                f"colorway for convert: {labels}. Dummy layout count={len(layouts)}."
+                f"Dummy layout count={len(layouts)}."
             )
         else:
             swatches = ", ".join(f"{p['label']} {p['hex']}" for p in palette) or "Sawgrass Lime + Water Teal"

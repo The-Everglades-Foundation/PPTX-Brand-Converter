@@ -107,7 +107,7 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 function templatePath(): string {
   if (!existsSync(TEMPLATE_PATH)) {
     throw new Error(
-      "Missing templates/everglades.pptx. Place Communications’ official 2023 TEMPLATE.pptx there.",
+      "Missing templates/everglades.pptx. Place the official template there.",
     );
   }
   return TEMPLATE_PATH;
@@ -160,7 +160,7 @@ export async function convertPptx(
     const selected = meta.colorway || chosen;
     return {
       bytes: file,
-      downloadName: `${base}-everglades-${selected}.pptx`,
+      downloadName: `${base}-everglades.pptx`,
       flags: meta.flags ?? [],
       warnings: meta.warnings ?? [],
       checks: meta.checks ?? {},

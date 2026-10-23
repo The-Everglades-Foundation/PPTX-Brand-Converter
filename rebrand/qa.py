@@ -386,7 +386,6 @@ def run_qa(out_dir: Path, source_path: Path, output_path: Path) -> dict[str, Any
         f"Source: `{source_path}`",
         f"Output: `{output_path}`",
         f"Template: `{tokens.get('source_template_path') or tokens.get('template_path')}`",
-        f"Colorway: `{tokens.get('colorway_label') or tokens.get('colorway') or 'green'}`",
         "",
     ]
     lines += ["## Plan", "", "| Output | Source | Role | Layout | Flags |", "| --- | --- | --- | --- | --- |"]
