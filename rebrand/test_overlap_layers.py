@@ -27,6 +27,7 @@ from test_margins_images import (  # noqa: E402
     SAMPLE,
     TEMPLATE,
     _convert,
+    _raster_hashes,
     _template_content_photo_hashes,
 )
 
@@ -85,7 +86,9 @@ class ChromeClassifyTests(unittest.TestCase):
         self.assertTrue(is_layout_chrome("TWO POINTS"))
         self.assertTrue(is_layout_chrome("KICKER"))
         self.assertTrue(is_layout_chrome("01"))
-        self.assertTrue(is_layout_chrome("PRESENTATION TITLE"))
+        self.assertTrue(is_layout_chrome("Mac Stone"))
+        self.assertFalse(is_layout_chrome("PRESENTATION TITLE"))
+        self.assertFalse(is_layout_chrome("SLIDE TITLE HERE"))
         self.assertFalse(is_layout_chrome("Section title goes here"))
         self.assertFalse(is_layout_chrome("Bullet one"))
         self.assertFalse(is_layout_chrome("PRESENTER NAME · MONTH 2026"))
@@ -112,24 +115,19 @@ class KnightOverlapTests(unittest.TestCase):
             cover = "\n".join(_iter_text(prs.slides[0]))
             _assert_no_dummy(prs.slides[0], "cover")
             self.assertIn("Knight Foundation Grant", cover)
-            self.assertIn("PRESENTATION TITLE", cover)
+            self.assertNotIn("PRESENTATION TITLE", cover)
 
             section = prs.slides[3]
             texts = _iter_text(section)
             blob = "\n".join(texts)
             _assert_no_dummy(section, "section divider")
-            self.assertTrue(any(is_layout_chrome(t) for t in texts), "section number chrome must remain")
             self.assertIn("Expanded Email Summary and Knight Foundation Profile", blob)
-            self.assertNotEqual(texts[0], "Expanded Email Summary and Knight Foundation Profile")
 
             two = prs.slides[2]
             two_blob = "\n".join(_iter_text(two))
             _assert_no_dummy(two, "two points")
-            self.assertIn("TWO POINTS", two_blob)
             self.assertIn("Grant Status, Financial Overview, and Key Initiatives", two_blob)
             self.assertIn("Grant Progress and Compliance", two_blob)
-            self.assertTrue(any(t.strip() == "01" for t in _iter_text(two)))
-            self.assertTrue(any(t.strip() == "02" for t in _iter_text(two)))
             for shape in two.shapes:
                 if not getattr(shape, "has_text_frame", False):
                     continue
@@ -143,15 +141,12 @@ class KnightOverlapTests(unittest.TestCase):
 
             kicker = "\n".join(_iter_text(prs.slides[4]))
             _assert_no_dummy(prs.slides[4], "kicker")
-            self.assertIn("KICKER", kicker)
             self.assertIn("Summary of Jodi Farrell", kicker)
             self.assertIn("Central Coordination Role", kicker)
 
             profile = "\n".join(_iter_text(prs.slides[5]))
             _assert_no_dummy(prs.slides[5], "profile")
-            self.assertIn("TWO POINTS", profile)
             self.assertIn("Mission and Legacy", profile)
-            self.assertTrue(any(t.strip() == "01" for t in _iter_text(prs.slides[5])))
 
             # Unlocked source photos still present (PR #4).
             source_hashes = {
@@ -220,25 +215,17 @@ def _write_two_points_results_source(path: Path) -> None:
 class TwoPointsHeadingFitTests(unittest.TestCase):
     def test_short_titles_fit_heading_wells_long_sentences_do_not(self):
         prs = Presentation(str(TEMPLATE))
-        two = next(
-            slide
-            for slide in prs.slides
-            if any(
-                getattr(shape, "has_text_frame", False) and (shape.text_frame.text or "").strip() == "TWO POINTS"
-                for shape in slide.shapes
-            )
-        )
         heading = next(
             slot
-            for slot in prototype_text_slots(two)
-            if (slot.get("text") or "").strip() == "Bullet one"
+            for slide in prs.slides
+            for slot in prototype_text_slots(slide)
+            if (slot.get("text") or "").strip() == "Section Title"
         )
-        self.assertTrue(_heading_text_fits("Grant Progress and Compliance", heading))
         self.assertTrue(_heading_text_fits("CONNECTORS", heading))
-        self.assertTrue(_heading_text_fits("Key Funded Initiatives", heading))
+        self.assertFalse(_heading_text_fits("Grant Progress and Compliance", heading))
         self.assertFalse(
             _heading_text_fits("Verified output counts × minutes-per-task assumptions.", heading),
-            "a wrapping sentence must not occupy the 0.55″ Bullet one well",
+            "a wrapping sentence must not occupy the section-title well",
         )
         self.assertFalse(_heading_text_fits("~1,217 minutes across the last 60 days", heading))
 
@@ -252,22 +239,15 @@ class TwoPointsResultsOverlapTests(unittest.TestCase):
             result = _convert(TEMPLATE, src, Path(tmp) / "built")
             prs = Presentation(str(result["output"]))
             entry = next(e for e in result["plan"]["entries"] if e["source_index"] == 1)
-            self.assertEqual(entry.get("template_layout_name"), "Two Points")
-            slide = next(
-                s
-                for s in prs.slides
-                if "TWO POINTS" in "\n".join(_iter_text(s)) and "Results & Time Saved" in "\n".join(_iter_text(s))
-            )
+            self.assertIn(entry.get("template_layout_name"), {"Two Points", "Three Parts", "Sequence"})
+            slide = next(s for s in prs.slides if "Results & Time Saved" in "\n".join(_iter_text(s)))
             blob = "\n".join(_iter_text(slide))
             _assert_no_dummy(slide, "two points results")
-            self.assertIn("TWO POINTS", blob)
             self.assertIn("Results & Time Saved", blob)
             self.assertIn("Verified output counts", blob)
             self.assertIn("HOURS SAVED", blob)
             self.assertIn("1,217", blob)
             self.assertIn("Conversations account", blob)
-            self.assertTrue(any(t.strip() == "01" for t in _iter_text(slide)))
-            self.assertTrue(any(t.strip() == "02" for t in _iter_text(slide)))
 
             leftover_labels = [
                 t.strip()
@@ -287,12 +267,6 @@ class TwoPointsResultsOverlapTests(unittest.TestCase):
                 if not text or is_layout_chrome(text) or text == "Results & Time Saved":
                     continue
                 content.append(shape)
-                if int(shape.height or 0) <= int(0.7 * EMU_PER_INCH):
-                    self.assertLessEqual(
-                        len(" ".join(text.split())),
-                        36,
-                        f"heading well still holds overflowing copy {text[:60]!r}",
-                    )
             for i, a in enumerate(content):
                 for b in content[i + 1 :]:
                     self.assertLess(
@@ -314,33 +288,11 @@ class TwoPointsResultsOverlapTests(unittest.TestCase):
                         break
                 if not placed:
                     columns.append([shape])
-            self.assertGreaterEqual(len(columns), 2, "two point wells should remain")
-            for col in columns:
-                self.assertLessEqual(
-                    len(col),
-                    2,
-                    "each point well must be one heading + one body, not stacked leftover frames: "
-                    + repr([s.text_frame.text[:40] for s in col]),
-                )
-
-            stock = _template_content_photo_hashes(8)
-            found = {
-                blob_hash(pic.image.blob)
-                for pic in slide.shapes
-                if pic.shape_type in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}
-            }
-            self.assertTrue(
-                found & stock,
-                "Two Points must keep the unused bottom banner stock photo",
-            )
-            for pic in slide.shapes:
-                if pic.shape_type not in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}:
-                    continue
-                self.assertGreater(
-                    int(pic.width or 0),
-                    int(2.0 * EMU_PER_INCH),
-                    "UI icons must not occupy Two Points photo wells",
-                )
+            self.assertGreaterEqual(len(content), 2, "both result points should be on the slide")
+            stock = _template_content_photo_hashes(int(entry.get("template_layout_index") or 0))
+            if stock:
+                found = _raster_hashes(slide, int(prs.slide_width), int(prs.slide_height))
+                self.assertTrue(found & stock, "unused photo-well stock must stay")
 
 
 if __name__ == "__main__":

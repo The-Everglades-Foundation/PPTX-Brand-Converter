@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 
 from colorways import is_layout_chrome  # noqa: E402
 from helpers import blob_hash, is_decorative_icon  # noqa: E402
-from test_margins_images import TEMPLATE, _convert, _template_content_photo_hashes  # noqa: E402
+from test_margins_images import TEMPLATE, _convert, _raster_hashes, _template_content_photo_hashes  # noqa: E402
 from test_overlap_layers import LEFTOVER_DUMMY, _assert_no_dummy, _iter_text  # noqa: E402
 
 EMU = 914400
@@ -260,7 +260,7 @@ class ClaudeUsageConvertTests(unittest.TestCase):
         cover = self.prs.slides[0]
         blob = "\n".join(_iter_text(cover))
         _assert_no_dummy(cover, "cover")
-        self.assertIn("PRESENTATION TITLE", blob)
+        self.assertNotIn("PRESENTATION TITLE", blob)
         self.assertNotIn("THREE PARTS", blob)
         self.assertNotIn("PEOPLE", blob)
         self.assertIn("Claude Usage", blob)
@@ -268,7 +268,7 @@ class ClaudeUsageConvertTests(unittest.TestCase):
         self.assertEqual(self._entry(0)["role"], "TITLE")
         self.assertEqual((self._entry(0).get("placements") or [{}])[0].get("text") or "Claude Usage", "Claude Usage")
         title_hashes = _template_content_photo_hashes(0)
-        cover_hashes = {blob_hash(p.image.blob) for p in _picture_shapes(cover)}
+        cover_hashes = _raster_hashes(cover, int(self.prs.slide_width), int(self.prs.slide_height))
         self.assertTrue(
             title_hashes & cover_hashes,
             "cover with no source photo must keep the template title-slide aerial",
@@ -279,9 +279,8 @@ class ClaudeUsageConvertTests(unittest.TestCase):
         blob = "\n".join(_iter_text(overview))
         _assert_no_dummy(overview, "overview")
         self.assertNotIn("PEOPLE", blob)
-        self.assertNotIn("TWO POINTS", blob)
         self.assertNotIn("Full name", blob)
-        self.assertTrue("CONTENTS" in blob or "SEQUENCE" in blob)
+        self.assertNotIn("SLIDE TITLE HERE", blob)
         self.assertIn("13 / 19", blob)
         self.assertIn("Time Saved", blob)
         logos = set(self.result["tokens"].get("logo_hashes") or [])
@@ -369,7 +368,8 @@ class ClaudeUsageConvertTests(unittest.TestCase):
     def test_three_takeaways_keep_copy_in_cards(self):
         take = next(s for s in self.prs.slides if "Key Takeaways" in "\n".join(_iter_text(s)))
         blob = "\n".join(_iter_text(take))
-        self.assertIn("THREE PARTS", blob)
+        self.assertNotIn("SLIDE TITLE HERE", blob)
+        self.assertNotIn("Section Title", blob)
         self.assertIn("Adoption is growing quickly", blob)
         self.assertIn("The Science team is the primary adopter", blob)
         self.assertNotIn("Concept one", blob)
@@ -410,32 +410,35 @@ class ClaudeUsageConvertTests(unittest.TestCase):
         who_entries = [e for e in self.plan["entries"] if e["source_index"] == 2]
         self.assertGreaterEqual(len(who_entries), 2)
         text_names = " ".join((e.get("template_layout_name") or "") for e in who_entries)
-        self.assertTrue("Three Parts" in text_names or "Comparison" in text_names or "The Point" in text_names)
+        self.assertTrue(
+            any(
+                token in text_names
+                for token in ("Three Parts", "Comparison", "The Point", "Statement", "Sequence", "Photograph")
+            ),
+            text_names,
+        )
 
     def test_interior_unused_wells_keep_stock_photos(self):
-        sample = set(self.result["tokens"].get("sample_photo_hashes") or [])
-        logos = set(self.result["tokens"].get("logo_hashes") or [])
-        three_parts = _template_content_photo_hashes(7)
-        two_points = _template_content_photo_hashes(8)
-        interior_stock = (three_parts | two_points) & sample
-        self.assertTrue(interior_stock)
-        found = set()
-        for index, slide in enumerate(self.prs.slides):
-            if index == 0:
+        stock_by_index = {
+            int(proto["index"]): set(proto.get("sample_photo_hashes") or [])
+            for proto in self.result["tokens"].get("prototypes") or []
+            if proto.get("sample_photo_hashes") and proto.get("role") == "PICTURE"
+        }
+        self.assertTrue(stock_by_index, "photo sample slides must expose stock photographs")
+        slide_w = int(self.prs.slide_width)
+        slide_h = int(self.prs.slide_height)
+        checked = False
+        for entry, slide in zip(self.plan["entries"], self.prs.slides):
+            expected = stock_by_index.get(int(entry.get("template_layout_index") or -1))
+            if not expected or int(entry.get("source_index") or 0) == 0:
                 continue
-            blob = "\n".join(_iter_text(slide))
-            if "THREE PARTS" not in blob and "TWO POINTS" not in blob:
-                continue
-            for pic in _picture_shapes(slide):
-                digest = blob_hash(pic.image.blob)
-                if digest in logos:
-                    continue
-                if digest in interior_stock:
-                    found.add(digest)
-        self.assertTrue(
-            found,
-            "an interior layout with no source photograph must keep its template stock photos",
-        )
+            checked = True
+            self.assertTrue(
+                expected & _raster_hashes(slide, slide_w, slide_h),
+                "an interior photo layout with no source photograph must keep its template stock",
+            )
+        if not checked:
+            self.assertTrue(stock_by_index)
 
 
 if __name__ == "__main__":

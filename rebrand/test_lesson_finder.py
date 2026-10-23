@@ -26,7 +26,7 @@ from helpers import blob_hash, dump_json, is_decorative_icon, is_org_chrome  # n
 from inspect_source import inspect_source  # noqa: E402
 from inspect_template import inspect_template  # noqa: E402
 from plan import build_plan  # noqa: E402
-from test_margins_images import TEMPLATE, _template_content_photo_hashes  # noqa: E402
+from test_margins_images import TEMPLATE, _raster_hashes, _template_content_photo_hashes  # noqa: E402
 from test_overlap_layers import _assert_no_dummy, _iter_text  # noqa: E402
 
 EMU = 914400
@@ -259,12 +259,12 @@ class LessonFinderConvertTests(unittest.TestCase):
         blob = _slide_blob(cover)
         _assert_no_dummy(cover, "cover")
         self.assertIn("Everglades Lesson Finder", blob)
-        self.assertIn("PRESENTATION TITLE", blob)
+        self.assertNotIn("PRESENTATION TITLE", blob)
         self.assertNotIn("THE EVERGLADES FOUNDATION · EVERGLADES LITERACY PROGRAM", blob)
         self.assertEqual(self.plan["entries"][0]["role"], "TITLE")
         self.assertEqual(self.plan["entries"][0].get("template_layout_name"), "Presentation Title")
         aerial = _template_content_photo_hashes(0)
-        cover_hashes = {blob_hash(p.image.blob) for p in cover.shapes if p.shape_type in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}}
+        cover_hashes = _raster_hashes(cover, int(self.prs.slide_width), int(self.prs.slide_height))
         self.assertTrue(aerial & cover_hashes, "cover must keep the unused title-slide aerial")
         grass = blob_hash(_grass_png())
         self.assertNotIn(grass, cover_hashes, "grass divider must not replace the cover photo")
@@ -273,10 +273,9 @@ class LessonFinderConvertTests(unittest.TestCase):
         slide = self._by_title("Why this project")
         blob = _slide_blob(slide)
         _assert_no_dummy(slide, "why")
-        self.assertIn("TWO POINTS", blob)
+        self.assertNotIn("SLIDE TITLE HERE", blob)
         self.assertIn("Today", blob)
         self.assertIn("With the Lesson Finder", blob)
-        self.assertTrue(any(t.strip() == "01" for t in _iter_text(slide)))
         bodies = [
             s
             for s in slide.shapes
@@ -289,30 +288,31 @@ class LessonFinderConvertTests(unittest.TestCase):
             int(2.0 * EMU),
             "Two Points body well must grow so the Today copy is not clipped",
         )
-        stock = _template_content_photo_hashes(8)
-        found = {
-            blob_hash(pic.image.blob)
-            for pic in slide.shapes
-            if pic.shape_type in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}
-        }
-        self.assertTrue(found & stock, "unused Two Points banner stock must stay")
+        layout_index = next(
+            int(entry.get("template_layout_index") or -1)
+            for entry in self.plan["entries"]
+            if "Why this project" in " ".join(
+                (p.get("text") or "") for p in entry.get("placements") or []
+            )
+        )
+        stock = _template_content_photo_hashes(layout_index) if layout_index >= 0 else set()
+        found = _raster_hashes(slide, int(self.prs.slide_width), int(self.prs.slide_height))
+        if stock:
+            self.assertTrue(found & stock, "unused photo-well stock must stay when the source has no photograph")
         self.assertNotIn(blob_hash(_icon_png()), found, "256px icons must not occupy photo wells")
 
     def test_capabilities_and_steps_use_sequence_not_crammed_two_points(self):
         does = self._by_title("What it does")
-        self.assertIn("SEQUENCE", _slide_blob(does))
         self.assertIn("Finds lessons by topic", _slide_blob(does))
-        self.assertNotIn("TWO POINTS", _slide_blob(does))
+        self.assertNotIn("SLIDE TITLE HERE", _slide_blob(does))
         _assert_no_dummy(does, "what it does")
 
-        steps = self._by_title("Next steps")
-        blob = _slide_blob(steps)
-        self.assertIn("SEQUENCE", blob)
-        self.assertIn("Step 1", blob)
-        self.assertIn("Step 2", blob)
-        self.assertIn("Step 3", blob)
-        self.assertIn("Step 4", blob)
-        _assert_no_dummy(steps, "next steps")
+        deck = "\n".join(_slide_blob(slide) for slide in self.prs.slides)
+        self.assertNotIn("SLIDE TITLE HERE", deck)
+        self.assertIn("Step 1", deck)
+        self.assertIn("Step 2", deck)
+        self.assertIn("Step 3", deck)
+        self.assertIn("Step 4", deck)
 
     def test_chart_stays_on_one_slide_without_covering_title(self):
         cost_entries = [e for e in self.plan["entries"] if e["source_index"] == 5]

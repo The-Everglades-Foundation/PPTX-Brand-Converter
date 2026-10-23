@@ -158,12 +158,17 @@ def inspect_template(
     inset_tops = [int(p["content_box"]["top"]) for p in prototypes if p.get("content_box")]
     content_inset = {}
     if inset_lefts:
-        inset_lefts.sort()
-        inset_tops.sort()
+        # Photo layouts park copy in the right half. The page margin is the
+        # leftmost text column, not the median of those right-hand wells.
+        page_lefts = [left for left in inset_lefts if left < width * 0.45] or list(inset_lefts)
+        page_tops = [top for top in inset_tops if top < height * 0.55] or list(inset_tops)
+        page_lefts.sort()
+        page_tops.sort()
+        margin = page_lefts[0]
         content_inset = {
-            "left": inset_lefts[len(inset_lefts) // 2],
-            "top": inset_tops[len(inset_tops) // 2] if inset_tops else int(height * 0.16),
-            "right": inset_lefts[len(inset_lefts) // 2],
+            "left": margin,
+            "top": page_tops[len(page_tops) // 2] if page_tops else int(height * 0.16),
+            "right": margin,
             "bottom": int(height * 0.08),
         }
     named_layouts = [
@@ -175,7 +180,21 @@ def inspect_template(
             for ph in item.get("placeholders") or []
         )
     ]
-    if prototypes and (len(layouts) <= 1 or not named_layouts):
+    designed_samples = 0
+    for slide in prs.slides:
+        layout_name = (slide.slide_layout.name or "").strip().upper()
+        content_placeholder = False
+        for shape in slide.shapes:
+            if not getattr(shape, "is_placeholder", False):
+                continue
+            ph_name = (enum_name(placeholder_type(shape)) or "").upper()
+            if ph_name not in {"", "DATE", "FOOTER", "SLIDE_NUMBER"}:
+                content_placeholder = True
+                break
+        if not content_placeholder or layout_name in {"BLANK", "DEFAULT"}:
+            designed_samples += 1
+    sample_slides_are_the_design = bool(prs.slides) and designed_samples >= int(len(list(prs.slides)) * 0.75)
+    if prototypes and (len(layouts) <= 1 or not named_layouts or sample_slides_are_the_design):
         from colorways import layout_map_from_prototypes
 
         layout_map = layout_map_from_prototypes(prototypes)
@@ -218,7 +237,16 @@ def inspect_template(
         "notes": [],
     }
     if prototypes:
-        if colorways:
+        if colorways and (colorways[0].get("source") == "accent_pairs"):
+            labels = ", ".join(
+                f"{c.get('label') or c.get('id')} {c.get('description') or ''}".strip()
+                for c in colorways
+            )
+            tokens["notes"].append(
+                f"Template uses {len(prototypes)} designed sample slides in paired colorways "
+                f"({labels}). Convert clones the series you pick."
+            )
+        elif colorways:
             labels = ", ".join(
                 f"{c.get('label') or c.get('id')} ({(c.get('description') or '').strip()})"
                 if c.get("description")

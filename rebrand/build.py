@@ -681,7 +681,15 @@ def build_presentation(
             tokens["_current_layout"] = layout_index
             fill_layout_slide(slide, entry, tokens, brand, entry_flags, work)
             cleanup_placeholders(slide)
-        remap_srgb_in_slide(slide, tokens.get("srgb_map") or {})
+        proto_map = next(
+            (
+                (proto.get("srgb_map") or {})
+                for proto in tokens.get("prototypes") or []
+                if int(proto.get("index") or -1) == layout_index and proto.get("srgb_map")
+            ),
+            None,
+        )
+        remap_srgb_in_slide(slide, proto_map if proto_map is not None else (tokens.get("srgb_map") or {}))
         notes = entry.get("notes") or ""
         if notes:
             slide.notes_slide.notes_text_frame.text = notes

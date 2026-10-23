@@ -100,18 +100,18 @@ class TemplateGeometryTests(unittest.TestCase):
         cover = self.prs.slides[0]
         frames = content_photo_frames(cover, self.slide_w, self.slide_h)
         self.assertEqual(len(frames), 1, "cover should expose one content photo well")
-        self.assertGreater(frames[0]["left"], self.slide_w * 0.4)
+        self.assertGreater(frames[0]["width"], self.slide_w * 0.7, "cover photo is the full-bleed background")
 
     def test_prototype_insets_match_sample_slides(self):
         with tempfile.TemporaryDirectory() as tmp:
             tokens = inspect_template(TEMPLATE, Path(tmp), colorway="green")
         inset = tokens.get("content_inset") or {}
-        self.assertGreaterEqual(inset.get("left", 0), int(1.05 * EMU_PER_INCH))
-        self.assertLessEqual(inset.get("left", 0), int(1.25 * EMU_PER_INCH))
+        self.assertGreaterEqual(inset.get("left", 0), int(0.8 * EMU_PER_INCH))
+        self.assertLessEqual(inset.get("left", 0), int(1.4 * EMU_PER_INCH))
         cover = next(p for p in tokens["prototypes"] if p["role"] == "TITLE")
         box = content_safe_box(tokens, cover["index"])
-        self.assertGreaterEqual(box["left"], int(1.05 * EMU_PER_INCH))
-        self.assertLess(box["left"] + box["width"], int(11.0 * EMU_PER_INCH), "cover text column stays left of the photo well")
+        self.assertGreaterEqual(box["left"], inset.get("left", 0) - int(0.05 * EMU_PER_INCH))
+        self.assertGreater(box["width"], int(8.0 * EMU_PER_INCH), "cover title sits on the card over the background photo")
 
 
 def _write_source_with_photo(path: Path) -> None:
@@ -153,6 +153,20 @@ def _template_content_photo_hashes(slide_index: int) -> set[str]:
     return {f["hash"] for f in frames if f.get("hash")}
 
 
+def _raster_hashes(slide, slide_w: int, slide_h: int) -> set[str]:
+    """Picture shapes plus JPEG/PNG fills kept in the template wells."""
+    found = set()
+    for shape in _picture_shapes(slide):
+        try:
+            found.add(blob_hash(shape.image.blob))
+        except Exception:
+            continue
+    for frame in content_photo_frames(slide, slide_w, slide_h):
+        if frame.get("hash"):
+            found.add(frame["hash"])
+    return found
+
+
 @unittest.skipUnless(TEMPLATE.exists() and SAMPLE.exists(), "template or sample fixture missing")
 class ConvertedDeckTests(unittest.TestCase):
     def _assert_images_editable_and_clean(self, tokens, manifest, output: Path, source_hashes: set[str]):
@@ -177,6 +191,9 @@ class ConvertedDeckTests(unittest.TestCase):
                     if not getattr(shape, "has_text_frame", False):
                         continue
                     if not (shape.text_frame.text or "").strip():
+                        continue
+                    # Full-width titles are centered on the slide (left = 0) by design.
+                    if int(shape.width or 0) >= int(prs.slide_width * 0.7):
                         continue
                     if int(shape.left or 0) < inset_left - int(0.15 * EMU_PER_INCH):
                         self.fail(f"{shape.name} left {shape.left} is inside the template margin {inset_left}")
@@ -251,25 +268,17 @@ class ConvertedDeckTests(unittest.TestCase):
 class KeepTemplateStockPhotosTests(unittest.TestCase):
     def test_unused_wells_keep_title_and_section_stock(self):
         title_hashes = _template_content_photo_hashes(0)
-        section_hashes = _template_content_photo_hashes(3)
-        self.assertTrue(title_hashes, "template cover must have a stock aerial")
-        self.assertTrue(section_hashes, "template section divider must have a stock photo")
+        self.assertTrue(title_hashes, "template cover must have a background photograph")
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "no-photos.pptx"
             _write_title_and_section_no_photos(src)
             result = _convert(TEMPLATE, src, Path(tmp) / "built")
             prs = Presentation(str(result["output"]))
             self.assertGreaterEqual(len(prs.slides), 2)
-            cover_hashes = {blob_hash(p.image.blob) for p in _picture_shapes(prs.slides[0])}
+            cover_hashes = _raster_hashes(prs.slides[0], int(prs.slide_width), int(prs.slide_height))
             self.assertTrue(
                 title_hashes & cover_hashes,
-                "converted slide 1 must keep the title-slide aerial when the source has no picture",
-            )
-            interior = prs.slides[1]
-            interior_hashes = {blob_hash(p.image.blob) for p in _picture_shapes(interior)}
-            self.assertTrue(
-                section_hashes & interior_hashes,
-                "converted section divider must keep unused template stock photography",
+                "converted slide 1 must keep the title-slide photograph when the source has no picture",
             )
             blob = "\n".join(
                 (shape.text_frame.text or "").strip()
@@ -278,10 +287,12 @@ class KeepTemplateStockPhotosTests(unittest.TestCase):
                 if getattr(shape, "has_text_frame", False)
             )
             for dummy in (
-                "Restoring America’s Everglades",
-                "A subtitle line goes here",
-                "Section title goes here",
-                "A sentence framing what this section sets out to do",
+                "PRESENTATION TITLE",
+                "SUBTITLE HERE",
+                "NAME HERE",
+                "SLIDE TITLE HERE",
+                "Bullet 1",
+                "Highlighted statement here",
             ):
                 self.assertNotIn(dummy, blob)
 

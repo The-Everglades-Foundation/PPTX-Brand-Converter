@@ -768,7 +768,13 @@ def pick_prototype_layout(
     caps = _all_caps_heading_count(slide)
 
     if role == "TITLE":
-        return prototype_index_matching(tokens, "cover layout") or default
+        # A first slide that is really a content layout with a side photo should use
+        # that photo well. Title-only covers stay on the cover sample.
+        has_body = bool(_content_slot_count(slide) or _text_column_count(slide))
+        # One side photograph plus body copy belongs on a photo sample.
+        # A title mosaic (several photos) stays on the cover.
+        if not (n_pics == 1 and has_body):
+            return prototype_index_matching(tokens, "cover layout") or default
     if role == "CLOSING":
         return prototype_index_matching(tokens, "closing slide") or default
     if role == "SECTION":

@@ -198,8 +198,8 @@ class TableOnSlideTests(unittest.TestCase):
                 continue
             name = entry.get("template_layout_name") or ""
             self.assertTrue(
-                "Comparison" in name or "comparison" in name.lower() or "Data" in name,
-                f"table slide should use Comparison, got {name!r}",
+                any(token in name.lower() for token in ("comparison", "data", "statement")),
+                f"table slide should use a content layout, got {name!r}",
             )
 
 

@@ -1,12 +1,10 @@
-"""Green / Blue staff picks mapped onto the 2023 template palette.
+"""Green / Blue staff picks taken from the template's own sample slides.
 
-The official PPTX contains both Sawgrass Lime (`C1D451`) and Water Teal
-(`00ACBF`) as hardcoded sRGB on the sample slides (plus Mangrove Green and
-Shell Sand). Those are the source of truth — not Design-tab variants.
-
-Staff still pick one for convert. Green applies Lime across the deck; Blue
-applies Teal. Both options stay available. If a later template encodes real
-schemes/masters/series, those labels win.
+The 2026 deck stores Leaf (`7FAE29`) and Lagoon (`04B1D2`) as hardcoded sRGB
+on paired sample slides. Convert clones the series staff pick. A template
+that still mixes Sawgrass Lime (`C1D451`) and Water Teal (`00ACBF`) on every
+slide keeps the older remap. Real color schemes, masters, or named series
+win when the file actually has them.
 """
 
 from __future__ import annotations
@@ -44,6 +42,7 @@ from helpers import (
     is_brand_lockup,
     is_decorative_icon,
     is_org_chrome,
+    iter_shapes,
     iter_shapes_abs,
     maybe_recompress,
     overlap_fraction,
@@ -69,18 +68,31 @@ MUTED = "5C5675"
 DEEP_TEAL = "00808F"
 CREAM = "FDFDFD"
 SHELL_LINE = "DFE2CE"
+LEAF = "7FAE29"
+LAGOON = "04B1D2"
+INK_2026 = "312E2B"
+
+# Accent families on the 2026 sample slides. 2023 lime/teal stay out of this
+# set so a mixed-palette deck is not split into a false green/blue series.
+LEAF_FAMILY = {
+    LEAF, "BADA55", "68A629", "387409", "ABDA55", "77AE27", "8AC13A", "51891A",
+}
+LAGOON_FAMILY = {
+    LAGOON, "00BAB3", "8ECAE6", "25B3D9", "0989C0", "1AD3CC", "00B9B2", "2ACED3", "2096BC",
+}
 
 EF_WHITELIST = [
     LIME, TEAL, MANGROVE, SAND, NAVY, MUTED, DEEP_TEAL, CREAM, SHELL_LINE,
-    "FFFFFF", "000000", "3B3159", "D6F2F5",
+    "FFFFFF", "000000", "3B3159", "D6F2F5", INK_2026, "253439", "EFEFEF",
+    *LEAF_FAMILY, *LAGOON_FAMILY,
 ]
 
 SKIP_PROTOTYPE_HINTS = ("notes for staff", "how to use this template", "internal reference")
 
 # Layout labels that belong on the rebuilt slide (not dummy wells).
 LAYOUT_CHROME_LABELS = {
-    "PRESENTATION TITLE",
     "CONTENTS",
+    "Mac Stone",
     "THE POINT",
     "BY THE NUMBERS",
     "KICKER",
@@ -114,6 +126,16 @@ HEADING_DUMMY_LABELS = {
     "phase three",
     "phase four",
     "name of speaker",
+    "bullet 1",
+    "bullet 2",
+    "bullet 3",
+    "section title",
+    "slide title here",
+    "subtitle here",
+    "name here",
+    "presentation title",
+    "highlighted statement here.",
+    "highlighted statement here",
 }
 PROTOTYPE_BODY_HINTS = (
     "description text here",
@@ -127,6 +149,15 @@ PROTOTYPE_BODY_HINTS = (
     "section title goes here",
     "a subtitle line goes here",
     "title template",
+    "description text here",
+    "highlighted statement here",
+    "slide title here",
+    "presentation title",
+    "subtitle here",
+    "name here",
+    "bullet 1",
+    "bullet 2",
+    "bullet 3",
 )
 EMU_INCH = 914400
 
@@ -169,11 +200,14 @@ def _sample_fonts(prs) -> tuple[str, str]:
                     name = run.font.name or ""
                     if not name:
                         continue
-                    if name.lower() in {"questrial", "poppins"} and not major:
+                    lowered = name.lower()
+                    if "bold" in lowered and any(token in lowered for token in ("arial nova", "questrial", "poppins", "open sans")) and not major:
                         major = name
-                    if name.lower() in {"arial", "arial nova"} and not minor:
+                    elif lowered in {"questrial", "poppins"} and not major:
+                        major = name
+                    if lowered in {"arial", "arial nova"} and not minor:
                         minor = name
-    return major or "Questrial", minor or "Arial"
+    return major or "Arial Nova", minor or "Arial"
 
 
 def _prototype_role(index: int, title: str, notes: str, total: int) -> str | None:
@@ -215,26 +249,132 @@ def _picture_hash(shape) -> str | None:
         return None
 
 
+def _direct_xfrm(element):
+    tag = element.tag.split("}")[-1]
+    if tag == "grpSp":
+        props = element.find(qn("p:grpSpPr"))
+    elif tag in {"sp", "pic", "cxnSp"}:
+        props = element.find(qn("p:spPr"))
+    else:
+        return None
+    if props is None:
+        return None
+    return props.find(qn("a:xfrm"))
+
+
+def _xfrm_box(xfrm) -> dict[str, int] | None:
+    off = xfrm.find(qn("a:off"))
+    ext = xfrm.find(qn("a:ext"))
+    if off is None or ext is None:
+        return None
+    box = {
+        "left": int(off.get("x") or 0),
+        "top": int(off.get("y") or 0),
+        "width": int(ext.get("cx") or 0),
+        "height": int(ext.get("cy") or 0),
+    }
+    ch_off = xfrm.find(qn("a:chOff"))
+    ch_ext = xfrm.find(qn("a:chExt"))
+    if ch_off is not None and ch_ext is not None:
+        box["ch_left"] = int(ch_off.get("x") or 0)
+        box["ch_top"] = int(ch_off.get("y") or 0)
+        box["ch_width"] = int(ch_ext.get("cx") or 0)
+        box["ch_height"] = int(ch_ext.get("cy") or 0)
+    return box
+
+
+def visual_box(shape) -> dict[str, int]:
+    """Slide-space box, including group child coordinates scaled by chExt."""
+    chain: list[dict[str, int]] = []
+    node = shape._element
+    while node is not None:
+        xfrm = _direct_xfrm(node)
+        if xfrm is not None:
+            box = _xfrm_box(xfrm)
+            if box:
+                chain.append(box)
+        node = node.getparent()
+    if not chain:
+        return _shape_box(shape)
+    left = chain[0]["left"]
+    top = chain[0]["top"]
+    width = chain[0]["width"]
+    height = chain[0]["height"]
+    for group in chain[1:]:
+        child_w = int(group.get("ch_width") or 0) or 1
+        child_h = int(group.get("ch_height") or 0) or 1
+        scale_x = int(group["width"]) / child_w
+        scale_y = int(group["height"]) / child_h
+        left = int(group["left"] + (left - int(group.get("ch_left") or 0)) * scale_x)
+        top = int(group["top"] + (top - int(group.get("ch_top") or 0)) * scale_y)
+        width = int(width * scale_x)
+        height = int(height * scale_y)
+    return {"left": left, "top": top, "width": max(0, width), "height": max(0, height)}
+
+
+def _raster_blip_blob(shape) -> bytes | None:
+    """JPEG/PNG painted as a shape fill. SVG marks and theme blips are skipped."""
+    blip = shape._element.find(f".//{{{A_NS}}}blip")
+    if blip is None:
+        return None
+    rid = blip.get(f"{{{R_NS}}}embed")
+    if not rid:
+        return None
+    try:
+        blob = shape.part.related_part(rid).blob
+    except Exception:
+        return None
+    if not blob or blob.lstrip()[:1] == b"<":
+        return None
+    if blob[:3] == b"\xff\xd8\xff" or blob[:8] == b"\x89PNG\r\n\x1a\n" or blob[:6] in {b"GIF87a", b"GIF89a"}:
+        return blob
+    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        return blob
+    return None
+
+
+def _photo_record(shape, slide_w: int, slide_h: int, blob: bytes | None, placeholder: bool) -> dict[str, Any] | None:
+    if not blob:
+        return None
+    box = visual_box(shape)
+    area = max(0, int(box["width"]) * int(box["height"]))
+    slide_area = max(1, int(slide_w) * int(slide_h))
+    if area < slide_area * 0.08:
+        return None
+    return {
+        **box,
+        "area": area,
+        "name": shape.name,
+        "hash": blob_hash(blob),
+        "logo": is_brand_lockup(
+            area, slide_area, box["left"], box["top"], box["width"], box["height"], slide_w, slide_h
+        ),
+        "placeholder": placeholder,
+        "shape": shape,
+    }
+
+
 def prototype_picture_records(slide, slide_w: int, slide_h: int) -> list[dict[str, Any]]:
     recs: list[dict[str, Any]] = []
-    slide_area = max(1, int(slide_w) * int(slide_h))
-    for shape in slide.shapes:
-        if shape.shape_type not in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}:
+    seen: set[int] = set()
+    for shape in iter_shapes(slide.shapes):
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP or id(shape._element) in seen:
             continue
-        box = _shape_box(shape)
-        area = max(0, box["width"] * box["height"])
-        recs.append(
-            {
-                **box,
-                "area": area,
-                "name": shape.name,
-                "hash": _picture_hash(shape),
-                "logo": is_brand_lockup(
-                    area, slide_area, box["left"], box["top"], box["width"], box["height"], slide_w, slide_h
-                ),
-                "placeholder": _is_picture_placeholder(shape),
-            }
-        )
+        blob = None
+        placeholder = False
+        if shape.shape_type in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}:
+            try:
+                blob = shape.image.blob
+            except Exception:
+                blob = None
+            placeholder = _is_picture_placeholder(shape)
+        else:
+            blob = _raster_blip_blob(shape)
+        record = _photo_record(shape, slide_w, slide_h, blob, placeholder)
+        if record is None:
+            continue
+        seen.add(id(shape._element))
+        recs.append(record)
     return recs
 
 
@@ -252,6 +392,8 @@ def prototype_content_box(slide, slide_w: int, slide_h: int, pictures: list[dict
         text = (shape.text_frame.text or "").strip()
         if not text:
             continue
+        if int(getattr(shape, "width", 0) or 0) >= int(slide_w * 0.9):
+            continue
         boxes.append(_shape_box(shape))
     for rec in pictures:
         if rec.get("logo"):
@@ -268,6 +410,59 @@ def prototype_content_box(slide, slide_w: int, slide_h: int, pictures: list[dict
     right = max(int(b["left"]) + int(b["width"]) for b in boxes)
     bottom = max(int(b["top"]) + int(b["height"]) for b in boxes)
     return clamp_box_to_slide({"left": left, "top": top, "width": right - left, "height": bottom - top}, slide_w, slide_h)
+
+
+def _structural_prototype(slide, pictures, texts, slide_w: int, slide_h: int) -> tuple[str, str, str]:
+    """Role for a designed sample slide that has no speaker notes.
+
+    The 2026 deck is paired green/blue art on the Blank layout. Notes on the
+    2023 deck still drive `_prototype_role`; this path is only for note-less slides.
+    """
+    frames = [p for p in pictures if not p.get("logo")]
+    hero = max(frames, key=lambda p: int(p.get("area") or 0), default=None)
+    side = "none"
+    if hero is not None:
+        width = int(hero.get("width") or 0)
+        center_x = (int(hero.get("left") or 0) + width / 2) / max(1, slide_w)
+        if width >= slide_w * 0.7:
+            side = "full"
+        elif center_x < 0.45:
+            side = "left"
+        elif center_x > 0.55:
+            side = "right"
+        else:
+            side = "center"
+    if side == "full" and len(texts) <= 4:
+        return "TITLE", "Presentation Title", "cover layout"
+    if side in {"left", "right"}:
+        return "PICTURE", "Photograph", "full-bleed photograph"
+
+    narrow_lefts: list[int] = []
+    short_heads = 0
+    for shape in slide.shapes:
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        text = (shape.text_frame.text or "").strip()
+        if not text or int(getattr(shape, "width", 0) or 0) >= int(slide_w * 0.85):
+            continue
+        narrow_lefts.append(int(getattr(shape, "left", 0) or 0))
+        lines = [line for line in text.splitlines() if line.strip()]
+        if len(lines) <= 2 and len(text.split()) <= 6:
+            short_heads += 1
+    narrow_lefts.sort()
+    clusters = 0
+    last = None
+    for left in narrow_lefts:
+        if last is None or left - last > int(2.2 * EMU_INCH):
+            clusters += 1
+        last = left
+    if clusters >= 4 or (short_heads >= 4 and clusters >= 2):
+        return "TITLE_BODY", "Sequence", "timeline or process sequence"
+    if clusters == 3:
+        return "TWO_CONTENT", "Three Parts", "three parts three parallel"
+    if clusters == 2:
+        return "TWO_CONTENT", "Two Points", "two-point two points"
+    return "TITLE_BODY", "Statement", "statement slide data table comparison"
 
 
 def discover_prototypes(prs) -> list[dict[str, Any]]:
@@ -291,10 +486,13 @@ def discover_prototypes(prs) -> list[dict[str, Any]]:
             name = texts[0].title()
         else:
             name = title[:60] or f"Slide {index + 1}"
-        role = _prototype_role(index, " ".join(texts[:3]), notes, total)
+        pictures = prototype_picture_records(slide, slide_w, slide_h)
+        if notes:
+            role = _prototype_role(index, " ".join(texts[:3]), notes, total)
+        else:
+            role, name, notes = _structural_prototype(slide, pictures, texts, slide_w, slide_h)
         if role is None:
             continue
-        pictures = prototype_picture_records(slide, slide_w, slide_h)
         frames = [p for p in pictures if not p.get("logo")]
         prototypes.append(
             {
@@ -621,6 +819,129 @@ def _colorways_from_palette(prs, layouts, xml_theme, prototypes) -> list[dict[st
     ]
 
 
+def _accent_family(slide) -> str:
+    green = blue = 0
+    for node in slide._element.iter(f"{{{A_NS}}}srgbClr"):
+        value = hex_color(node.get("val") or "")
+        if value in LEAF_FAMILY:
+            green += 1
+        elif value in LAGOON_FAMILY:
+            blue += 1
+    if green and blue:
+        return "mixed"
+    if green:
+        return "green"
+    if blue:
+        return "blue"
+    return "neutral"
+
+
+def _photo_side(proto: dict[str, Any], slide_w: int) -> str:
+    frames = proto.get("photo_frames") or []
+    if not frames or slide_w <= 0:
+        return "none"
+    hero = max(frames, key=lambda frame: int(frame.get("width") or 0) * int(frame.get("height") or 0))
+    width = int(hero.get("width") or 0)
+    center_x = (int(hero.get("left") or 0) + width / 2) / slide_w
+    if width >= slide_w * 0.7:
+        return "full"
+    if center_x < 0.45:
+        return "left"
+    if center_x > 0.55:
+        return "right"
+    return "center"
+
+
+def _pair_key(proto: dict[str, Any], slide_w: int) -> str:
+    return f"{_photo_side(proto, slide_w)}|{proto.get('role')}|{(proto.get('name') or '').lower()}"
+
+
+def _accent_theme(major: str, minor: str, primary: str, secondary: str) -> dict[str, Any]:
+    theme = _base_theme(major, minor, primary, secondary)
+    colors = dict(theme["colors"])
+    colors["dk1"] = INK_2026
+    colors["lt1"] = "FFFFFF"
+    colors["accent3"] = "BADA55"
+    colors["accent4"] = "00BAB3"
+    colors["accent5"] = secondary
+    colors["accent6"] = primary
+    theme["colors"] = colors
+    return theme
+
+
+def _colorways_from_accent_pairs(prs, layouts, xml_theme, prototypes) -> list[dict[str, Any]]:
+    """Split sample slides when the same layout is drawn once in each accent.
+
+    Slides that exist in only one accent stay available to both colorways.
+    The missing accent is applied to that slide alone when it is cloned.
+    """
+    if len(prototypes) < 2:
+        return []
+    families = {index: _accent_family(slide) for index, slide in enumerate(prs.slides)}
+    if "green" not in families.values() or "blue" not in families.values():
+        return []
+    slide_w = int(prs.slide_width)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for proto in prototypes:
+        grouped.setdefault(_pair_key(proto, slide_w), []).append(proto)
+    pair_count = 0
+    for group in grouped.values():
+        seen = {families.get(int(proto["index"])) for proto in group}
+        if "green" in seen and "blue" in seen:
+            pair_count += 1
+    if pair_count < 2:
+        return []
+
+    def _tagged(proto: dict[str, Any], family: str) -> dict[str, Any]:
+        copied = deepcopy(proto)
+        native = families.get(int(proto["index"]))
+        if family == "blue" and native == "green":
+            copied["srgb_map"] = {LEAF: LAGOON}
+        elif family == "green" and native == "blue":
+            copied["srgb_map"] = {LAGOON: LEAF}
+        else:
+            copied["srgb_map"] = {}
+        return copied
+
+    buckets: dict[str, list[dict[str, Any]]] = {"green": [], "blue": []}
+    for group in grouped.values():
+        seen = {families.get(int(proto["index"])) for proto in group}
+        for family in ("green", "blue"):
+            native = [proto for proto in group if families.get(int(proto["index"])) == family]
+            if native:
+                buckets[family].extend(_tagged(proto, family) for proto in native)
+                continue
+            if "mixed" in seen or "neutral" in seen or seen - {family}:
+                donors = [proto for proto in group if families.get(int(proto["index"])) != family]
+                buckets[family].extend(_tagged(proto, family) for proto in donors)
+    if not buckets["green"] or not buckets["blue"]:
+        return []
+    major, minor = _sample_fonts(prs)
+    options = []
+    for key, accent, other, label in (
+        ("green", LEAF, LAGOON, "Green"),
+        ("blue", LAGOON, LEAF, "Blue"),
+    ):
+        group = buckets[key]
+        layout_map = layout_map_from_prototypes(group)
+        options.append(
+            {
+                "id": key,
+                "label": label,
+                "description": f"{accent}",
+                "source": "accent_pairs",
+                "theme": _accent_theme(major, minor, accent, other),
+                "layout_map": layout_map,
+                "layout_names": _layout_names_for(layouts, group, layout_map),
+                "prototype_indices": [int(p["index"]) for p in group],
+                "prototypes": group,
+                "build_mode": "prototypes",
+                "srgb_map": {},
+            }
+        )
+    return options
+
+
 def detect_colorways(
     prs,
     layouts: list[dict[str, Any]],
@@ -629,13 +950,15 @@ def detect_colorways(
 ) -> list[dict[str, Any]]:
     """Return Green/Blue (or later structural options) for the staff picker.
 
-    Always includes both template palette colors as pickable colorways.
+    Paired sample-slide accents win over a flat lime/teal remap. Both colors
+    stay pickable.
     """
     for finder in (
         _colorways_from_extra_schemes,
         _colorways_from_masters,
         _colorways_from_theme_overrides,
         _colorways_from_prototype_series,
+        _colorways_from_accent_pairs,
     ):
         found = finder(prs, layouts, theme, prototypes)
         if len(found) >= 2:
@@ -654,7 +977,11 @@ def apply_colorway(tokens: dict[str, Any], colorway_id: str | None) -> dict[str,
         "Questrial",
         "Arial",
         "Arial Nova",
+        "Arial Nova Bold",
+        "Open Sans Bold",
         "Poppins",
+        "Roboto",
+        "Mont",
     ]
     brand["fonts"] = sorted({f for f in list(brand.get("fonts") or []) + extra_fonts if f})
     tokens["brand_md"] = brand
@@ -679,6 +1006,8 @@ def apply_colorway(tokens: dict[str, Any], colorway_id: str | None) -> dict[str,
     tokens["theme"] = match.get("theme") or tokens.get("theme")
     tokens["layout_map"] = match.get("layout_map") or tokens.get("layout_map")
     tokens["layout_names"] = match.get("layout_names") or tokens.get("layout_names")
+    if match.get("prototypes"):
+        tokens["prototypes"] = match["prototypes"]
     tokens["srgb_map"] = match.get("srgb_map") or {}
     tokens["build_mode"] = match.get("build_mode") or tokens.get("build_mode") or "layouts"
     tokens["colorway_label"] = match.get("label") or match["id"]
@@ -1536,28 +1865,24 @@ def _is_picture_placeholder(shape) -> bool:
 
 
 def content_photo_frames(slide, slide_w: int, slide_h: int) -> list[dict[str, Any]]:
-    """Template content photo frames (not the top-left brand lockup)."""
+    """Template content photo frames (not the top-left brand lockup).
+
+    Pictures and large JPEG/PNG fills (the 2026 wells are blip fills inside groups)
+    both count. SVG marks do not.
+    """
     recs: list[dict[str, Any]] = []
-    slide_area = max(1, int(slide_w) * int(slide_h))
-    for shape in slide.shapes:
-        if shape.shape_type not in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}:
-            continue
-        left = int(shape.left or 0)
-        top = int(shape.top or 0)
-        width = int(shape.width or 0)
-        height = int(shape.height or 0)
-        area = width * height
+    for record in prototype_picture_records(slide, slide_w, slide_h):
         recs.append(
             {
-                "shape": shape,
-                "left": left,
-                "top": top,
-                "width": width,
-                "height": height,
-                "area": area,
-                "hash": _picture_hash(shape),
-                "placeholder": _is_picture_placeholder(shape),
-                "logo": is_brand_lockup(area, slide_area, left, top, width, height, slide_w, slide_h),
+                "shape": record["shape"],
+                "left": int(record["left"]),
+                "top": int(record["top"]),
+                "width": int(record["width"]),
+                "height": int(record["height"]),
+                "area": int(record["area"]),
+                "hash": record.get("hash"),
+                "placeholder": bool(record.get("placeholder")),
+                "logo": bool(record.get("logo")),
             }
         )
     frames: list[dict[str, Any]] = []
@@ -1981,7 +2306,9 @@ def place_source_photos(
     slide_w = int(tokens["slide_width"])
     slide_h = int(tokens["slide_height"])
     frames = content_photo_frames(slide, slide_w, slide_h)
-    if _is_cover_photo_slide(role, frames):
+    hero = max(frames, key=lambda item: int(item.get("area") or 0), default=None)
+    full_bleed = bool(hero) and int(hero.get("width") or 0) >= int(slide_w * 0.7)
+    if _is_cover_photo_slide(role, frames) and full_bleed:
         _place_cover_photos(slide, sources, frames, tokens, flags)
         return
     used_ids: set[int] = set()

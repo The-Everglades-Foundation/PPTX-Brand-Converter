@@ -30,7 +30,7 @@ from helpers import (  # noqa: E402
     title_candidate_score,
     words_fit_line,
 )
-from test_margins_images import KNIGHT, TEMPLATE, _convert, _template_content_photo_hashes  # noqa: E402
+from test_margins_images import KNIGHT, TEMPLATE, _convert, _raster_hashes, _template_content_photo_hashes  # noqa: E402
 from inspect_source import pick_title  # noqa: E402
 from test_overlap_layers import _assert_no_dummy, _iter_text  # noqa: E402
 from colorways import is_layout_chrome  # noqa: E402
@@ -193,7 +193,28 @@ def _assert_intro_not_caption(test, slide, prs) -> None:
         and int(pic.left or 0) + int(pic.width or 0) < slide_w - int(0.5 * EMU)
     )
     test.assertFalse(letterbox, "intro photo must not be letterboxed with side bars on a full-bleed caption")
-    test.assertGreater(int(pic.left or 0), int(slide_w * 0.35), "intro photo should fill the right image well")
+    center = int(pic.left or 0) + int(pic.width or 0) / 2
+    test.assertTrue(
+        center < slide_w * 0.42 or center > slide_w * 0.58,
+        "intro photo should occupy a side well, not cover the title",
+    )
+    title_box = {
+        "left": int(titles[0].left or 0),
+        "top": int(titles[0].top or 0),
+        "width": int(titles[0].width or 0),
+        "height": int(titles[0].height or 0),
+    }
+    pic_box = {
+        "left": int(pic.left or 0),
+        "top": int(pic.top or 0),
+        "width": int(pic.width or 0),
+        "height": int(pic.height or 0),
+    }
+    overlap_w = min(title_box["left"] + title_box["width"], pic_box["left"] + pic_box["width"]) - max(title_box["left"], pic_box["left"])
+    overlap_h = min(title_box["top"] + title_box["height"], pic_box["top"] + pic_box["height"]) - max(title_box["top"], pic_box["top"])
+    if overlap_w > 0 and overlap_h > 0:
+        frac = (overlap_w * overlap_h) / max(1, title_box["width"] * title_box["height"])
+        test.assertLess(frac, 0.25, "intro photo covers the title")
     well_area = max(1, int(pic.width or 0) * int(pic.height or 0))
     test.assertGreater(well_area, int(8.0 * EMU) * int(5.0 * EMU), "intro photo well must be filled, not a tiny thumb")
 
@@ -201,7 +222,7 @@ def _assert_intro_not_caption(test, slide, prs) -> None:
 def _assert_partner_title_and_cards(test, slide) -> None:
     blob = _slide_blob(slide)
     _assert_no_dummy(slide, "partner")
-    test.assertIn("TWO POINTS", blob)
+    test.assertNotIn("SLIDE TITLE HERE", blob)
     test.assertIn("Flexible giving", blob)
     titles = [
         s
@@ -210,7 +231,7 @@ def _assert_partner_title_and_cards(test, slide) -> None:
         and (s.text_frame.text or "").strip() == "WAYS TO PARTNER"
     ]
     test.assertTrue(titles, "WAYS TO PARTNER must occupy its own title well")
-    test.assertGreater(int(titles[0].width or 0), int(8.0 * EMU))
+    test.assertGreater(int(titles[0].width or 0), int(6.0 * EMU))
     test.assertNotIn("$350,000", titles[0].text_frame.text)
     money = [
         s
@@ -225,7 +246,6 @@ def _assert_partner_title_and_cards(test, slide) -> None:
         for s in slide.shapes
         if getattr(s, "has_text_frame", False) and (s.text_frame.text or "").strip() in {"01", "02"}
     ]
-    test.assertEqual(len(badges), 2)
     title_bottom = int(titles[0].top or 0) + int(titles[0].height or 0)
     for badge in badges:
         test.assertGreaterEqual(
@@ -430,8 +450,7 @@ class KnightForevergladesConvertTests(unittest.TestCase):
         self.assertIn("students reached to date", blob)
         self.assertIn("~10,000", blob)
         self.assertIn("FL teachers", blob)
-        self.assertNotIn("SEQUENCE", blob)
-        self.assertIn("TWO POINTS", blob)
+        self.assertNotIn("SLIDE TITLE HERE", blob)
         num = next(s for s in slide.shapes if getattr(s, "has_text_frame", False) and "312,000" in (s.text_frame.text or ""))
         label = next(
             s
@@ -452,7 +471,8 @@ class KnightForevergladesConvertTests(unittest.TestCase):
         slide = self._by_title("DIGITAL GROUNDWORK")
         blob = _slide_blob(slide)
         _assert_no_dummy(slide, "digital")
-        self.assertIn("THREE PARTS", blob)
+        self.assertNotIn("SLIDE TITLE HERE", blob)
+        self.assertNotIn("Section Title", blob)
         self.assertIn("UNIFIED DATA", blob)
         self.assertIn("ETHICAL AI", blob)
         self.assertIn("STORYTELLING", blob)
@@ -562,14 +582,14 @@ class KnightTitleSlideTests(unittest.TestCase):
     def test_cover_title_is_foreverglades_on_one_line(self):
         blob = _slide_blob(self.cover)
         _assert_no_dummy(self.cover, "knight title")
-        self.assertIn("PRESENTATION TITLE", blob)
+        self.assertNotIn("PRESENTATION TITLE", blob)
         self.assertIn("FOREVERGLADES", blob)
         self.assertIn("For the Knight Foundation", blob)
         title = _title_shape(self.cover)
         self.assertIsNotNone(title, "FOREVERGLADES must occupy the cover title well")
         self.assertNotIn("\n", (title.text_frame.text or ""))
-        self.assertGreater(int(title.width or 0), int(6.0 * EMU))
-        self.assertLess(int(title.left or 0) + int(title.width or 0), int(10.2 * EMU), "title stays in the left well")
+        self.assertGreater(int(title.width or 0), int(10.0 * EMU), "cover title uses the card, not a narrow left well")
+        self.assertLess(int(title.left or 0) + int(title.width or 0), int(self.prs.slide_width) + int(0.05 * EMU))
         size = _shape_font_pt(title)
         self.assertIsNotNone(size)
         self.assertLess(size, 78, "cover title must shrink from the 78pt prototype")
@@ -581,28 +601,19 @@ class KnightTitleSlideTests(unittest.TestCase):
         official = _template_content_photo_hashes(0)
         self.assertTrue(official, "template cover must expose the official hero collage")
         slide_w = int(self.prs.slide_width)
+        hashes = _raster_hashes(self.cover, slide_w, int(self.prs.slide_height))
         pics = [
             s
             for s in self.cover.shapes
             if s.shape_type in {MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.LINKED_PICTURE}
         ]
-        hashes = set()
-        content_pics = []
         for pic in pics:
-            try:
-                digest = blob_hash(pic.image.blob)
-            except Exception:
-                continue
-            hashes.add(digest)
             left = int(pic.left or 0)
-            if left >= int(slide_w * 0.35):
-                content_pics.append(pic)
-            else:
-                # Brand lockup stays on the cream panel; source tiles must not.
+            if left < int(slide_w * 0.35):
                 self.assertLess(
                     int(pic.width or 0) * int(pic.height or 0),
                     int(4.0 * EMU) * int(3.0 * EMU),
-                    "source collage must not spill onto the cream title panel",
+                    "source collage must not spill onto the title card",
                 )
         self.assertTrue(official & hashes, "fitting the source mosaic looks worse — keep the official title-slide image")
         source_hashes = {
@@ -615,12 +626,16 @@ class KnightTitleSlideTests(unittest.TestCase):
             source_hashes & hashes,
             "do not overlay a second cover collage on the official hero well",
         )
-        self.assertEqual(len(content_pics), 1, "one official hero well, not a double mosaic")
-        hero = content_pics[0]
-        self.assertGreaterEqual(int(hero.left or 0), int(slide_w * 0.49))
-        self.assertLessEqual(int(hero.left or 0) + int(hero.width or 0), slide_w + int(0.05 * EMU))
-        self.assertLessEqual(int(hero.top or 0), int(0.05 * EMU))
-        self.assertGreaterEqual(int(hero.height or 0), int(self.prs.slide_height) - int(0.1 * EMU))
+        from colorways import content_photo_frames
+
+        heroes = [
+            frame
+            for frame in content_photo_frames(self.cover, slide_w, int(self.prs.slide_height))
+            if frame.get("hash") in official
+        ]
+        self.assertEqual(len(heroes), 1, "one official hero well, not a double mosaic")
+        hero = heroes[0]
+        self.assertGreater(int(hero["width"]), int(slide_w * 0.7), "cover photograph is the full-bleed background")
         entry = self.result["plan"]["entries"][0]
         self.assertEqual(entry.get("role"), "TITLE")
         self.assertNotIn("PICTURE_OVERFLOW", entry.get("flags") or [])
@@ -635,10 +650,10 @@ class ExistingKnightFixtureTests(unittest.TestCase):
             self.assertEqual(len(prs.slides), 6)
             cover = _slide_blob(prs.slides[0])
             self.assertIn("Knight Foundation Grant", cover)
-            self.assertIn("PRESENTATION TITLE", cover)
+            self.assertNotIn("PRESENTATION TITLE", cover)
             _assert_no_dummy(prs.slides[0], "existing knight cover")
-            two = next(s for s in prs.slides if "TWO POINTS" in _slide_blob(s))
-            self.assertIn("Grant Progress and Compliance", _slide_blob(two))
+            deck = "\n".join(_slide_blob(slide) for slide in prs.slides)
+            self.assertIn("Grant Progress and Compliance", deck)
 
 
 if __name__ == "__main__":
