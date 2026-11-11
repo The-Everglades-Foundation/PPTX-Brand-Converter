@@ -1,0 +1,13 @@
+.git
+.astro
+.cursor
+.tmp
+dist
+node_modules
+converter/.venv
+converter/**/__pycache__
+rebrand/**/__pycache__
+*.log
+.DS_Store
+.env
+.env.production
