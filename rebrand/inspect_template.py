@@ -193,7 +193,7 @@ def inspect_template(
                 break
         if not content_placeholder or layout_name in {"BLANK", "DEFAULT"}:
             designed_samples += 1
-    sample_slides_are_the_design = bool(prs.slides) and designed_samples >= int(len(list(prs.slides)) * 0.75)
+    sample_slides_are_the_design = bool(prs.slides) and designed_samples >= int(len(prs.slides) * 0.75)
     if prototypes and (len(layouts) <= 1 or not named_layouts or sample_slides_are_the_design):
         from colorways import layout_map_from_prototypes
 

@@ -149,7 +149,6 @@ PROTOTYPE_BODY_HINTS = (
     "section title goes here",
     "a subtitle line goes here",
     "title template",
-    "description text here",
     "highlighted statement here",
     "slide title here",
     "presentation title",
@@ -240,13 +239,6 @@ def _shape_box(shape) -> dict[str, int]:
         "width": int(getattr(shape, "width", 0) or 0),
         "height": int(getattr(shape, "height", 0) or 0),
     }
-
-
-def _picture_hash(shape) -> str | None:
-    try:
-        return blob_hash(shape.image.blob)
-    except Exception:
-        return None
 
 
 def _direct_xfrm(element):
@@ -1870,9 +1862,11 @@ def content_photo_frames(slide, slide_w: int, slide_h: int) -> list[dict[str, An
     Pictures and large JPEG/PNG fills (the 2026 wells are blip fills inside groups)
     both count. SVG marks do not.
     """
-    recs: list[dict[str, Any]] = []
+    frames: list[dict[str, Any]] = []
     for record in prototype_picture_records(slide, slide_w, slide_h):
-        recs.append(
+        if record.get("logo"):
+            continue
+        frames.append(
             {
                 "shape": record["shape"],
                 "left": int(record["left"]),
@@ -1882,19 +1876,9 @@ def content_photo_frames(slide, slide_w: int, slide_h: int) -> list[dict[str, An
                 "area": int(record["area"]),
                 "hash": record.get("hash"),
                 "placeholder": bool(record.get("placeholder")),
-                "logo": bool(record.get("logo")),
+                "logo": False,
             }
         )
-    frames: list[dict[str, Any]] = []
-    for rec in recs:
-        if rec["logo"]:
-            continue
-        siblings = [other for other in recs if not other["logo"] and abs(other["area"] - rec["area"]) / max(rec["area"], 1) <= 0.08]
-        if len(siblings) >= 2:
-            frames.append(rec)
-            continue
-        # Any remaining non-logo picture is sample art / a photo well, including cover heroes.
-        frames.append(rec)
     frames.sort(
         key=lambda item: (
             0 if item["placeholder"] else 1,

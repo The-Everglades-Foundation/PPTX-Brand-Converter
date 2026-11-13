@@ -770,7 +770,7 @@ def pick_prototype_layout(
     if role == "TITLE":
         # A first slide that is really a content layout with a side photo should use
         # that photo well. Title-only covers stay on the cover sample.
-        has_body = bool(_content_slot_count(slide) or _text_column_count(slide))
+        has_body = bool(slots or cols)
         # One side photograph plus body copy belongs on a photo sample.
         # A title mosaic (several photos) stays on the cover.
         if not (n_pics == 1 and has_body):
