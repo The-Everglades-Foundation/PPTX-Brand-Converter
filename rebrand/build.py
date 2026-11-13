@@ -46,6 +46,7 @@ from helpers import (  # noqa: E402
     clamp_box_to_slide,
     contain_fit,
     content_safe_box,
+    _prototype_record,
     crop_cut_fraction,
     data_content_box,
     delete_all_slides,
@@ -681,14 +682,8 @@ def build_presentation(
             tokens["_current_layout"] = layout_index
             fill_layout_slide(slide, entry, tokens, brand, entry_flags, work)
             cleanup_placeholders(slide)
-        proto_map = next(
-            (
-                (proto.get("srgb_map") or {})
-                for proto in tokens.get("prototypes") or []
-                if int(proto.get("index") or -1) == layout_index and proto.get("srgb_map")
-            ),
-            None,
-        )
+        proto = _prototype_record(tokens, layout_index)
+        proto_map = (proto.get("srgb_map") or {}) if proto and proto.get("srgb_map") else None
         remap_srgb_in_slide(slide, proto_map if proto_map is not None else (tokens.get("srgb_map") or {}))
         notes = entry.get("notes") or ""
         if notes:
